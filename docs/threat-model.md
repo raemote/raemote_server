@@ -1,0 +1,98 @@
+# Threat Model
+
+This document describes what Raemote protects, what it explicitly does **not**
+protect, and the assumptions behind the device-trust model. It is meant to be
+readable by a technical user deciding whether to trust Raemote with access to
+their machine.
+
+## Assets
+
+- **Server identity** — the daemon's private key (`~/.raemote/secret.key`).
+- **Device trust** — the set of paired device identities (`~/.raemote/authorized_nodes`).
+- **Local applications** — the web apps the daemon can proxy to on loopback.
+- **Configuration** — `~/.raemote/config.toml`.
+
+## Actors
+
+- **Owner** — the person operating the server. Has shell access; can pair,
+  revoke, and read logs.
+- **Paired device** — a phone/tablet whose identity is in the trusted set.
+- **Pairing link/QR** — a short-lived, high-entropy token plus the server node id.
+- **Network** — the Internet and any relays. Untrusted.
+- **Relay operators** — forward encrypted packets; cannot read them.
+
+## What Raemote protects
+
+1. **Transport confidentiality and integrity.** All client/server traffic runs
+   over iroh (QUIC/TLS), end to end. A relay may forward packets but cannot read
+   or modify them.
+2. **Access control by device identity.** Only devices that have completed
+   pairing may use the serve API. Knowing the server's node id is not enough.
+3. **No public exposure.** Installing Raemote does not publish any local app to
+   the Internet; apps stay on loopback and are reached only through a paired
+   connection.
+4. **Bounded pairing window.** The pairing token is 256-bit, compared in
+   constant time, expires (default 300 s), and is invalidated after a number of
+   failed attempts.
+5. **Revocation.** The owner can revoke a device; revoked devices are refused on
+   their next request.
+6. **Device identity at rest.** The phone's private key lives in the iOS
+   Keychain, marked device-only: it is not synced to iCloud and not restored
+   onto another device from a backup.
+
+## What Raemote does NOT protect
+
+- **The applications' own authentication.** Raemote secures *transport and
+  device access*. If an app has its own login, that login still applies.
+- **A compromised paired device.** Anyone with an unlocked, paired phone has the
+  same access that phone has.
+- **A compromised or malicious server operator.** Raemote runs on the owner's
+  machine and trusts the owner.
+- **Metadata.** Relay and network observers can see that a connection happened
+  and its endpoints, even though the contents are encrypted.
+- **Pairing-link phishing.** Anyone who obtains a *live* pairing link before it
+  expires can pair a device. Treat the QR/link as a secret and let it expire.
+
+## Attack surface and mitigations
+
+| Surface | Mitigation |
+| --- | --- |
+| Guessing the pairing token | 256-bit token, constant-time compare, expiry, failed-attempt lockout |
+| Stolen/expired pairing link | Short TTL; token expires and is replaceable; post-expiry reuse fails |
+| Unauthorized serve connections | Device-identity allowlist; unauthorized connections closed |
+| A revoked device with an open connection | Authorization is re-checked on every request; the connection is closed |
+| Trust-store tampering/corruption | `~/.raemote` is mode `0700`; a corrupt store fails closed (deny) |
+| Resource exhaustion by a paired device | Per-device rate limit and concurrency cap |
+| Duplicate/misconfigured daemons | Single-instance OS lock on `~/.raemote/daemon.lock` |
+| Local information disclosure via logs | Logs live in `~/.raemote` (mode `0700`), rotating and capped |
+| Outbound proxy trust | Optional, explicit; only iroh relay/discovery HTTP(S) is proxied |
+
+## Assumptions and known limitations
+
+- **No independent audit yet.** The model is simple by design, but it has not
+  been externally reviewed. Treat early releases accordingly.
+- **HTTP-only probing.** Discovery probes local origins over HTTP. HTTPS
+  origins are not probed or proxied yet.
+- **Relay metadata.** As above, an observer learns that a connection occurred.
+- **Device names are display-only.** A device name never affects access; the
+  trusted set is keyed on node id alone.
+- **macOS visibility.** Without root, the daemon only sees the current user's
+  processes (intended: system services stay invisible to discovery).
+- **Local host trust.** A local attacker who can read the owner's files can read
+  the server key. This is unavoidable for a user-run agent; protect your home
+  directory.
+
+## Security requirements mapping
+
+| Requirement | Status |
+| --- | --- |
+| Node-id exposure alone is insufficient | Implemented |
+| Pairing authorization expires | Implemented |
+| Pairing is not permanent access | Implemented |
+| Only explicitly trusted identities may access | Implemented |
+| Devices are individually revocable | Implemented |
+| Communication is authenticated and encrypted | Implemented |
+| Server identity persists | Implemented |
+| Device trust persists (fail-safe) | Implemented |
+| Updates are authenticated | Partial (checksum-verified downloads; no signed releases) |
+| Security does not rely on secrecy of the implementation | Intended (open source; license added) |
