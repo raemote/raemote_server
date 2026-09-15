@@ -205,9 +205,12 @@ impl DiscoveryEngine {
 /// proxy answering `GET /` with an error and no page.
 ///
 /// Any non-error status counts (so JSON APIs and redirects are kept), as does
-/// any response with a `<title>` (so a login page answering 401/403 is kept).
+/// any response with a `<title>`, as does an auth-required status (401/403)
+/// even without a title — an auth-gated app is still a web app. Other error
+/// statuses without a page (e.g. a proxy answering `GET /` with 400) are
+/// dropped.
 fn is_credible(result: &probe::ProbeResult) -> bool {
-    result.title.is_some() || result.status < 400
+    result.title.is_some() || result.status < 400 || matches!(result.status, 401 | 403)
 }
 
 #[cfg(test)]
@@ -232,6 +235,14 @@ mod tests {
     fn error_with_title_is_credible() {
         // A login page often answers 401 but still has a title.
         assert!(is_credible(&result(401, Some("Sign in"))));
+    }
+
+    #[test]
+    fn auth_required_without_title_is_credible() {
+        // An auth-gated app may answer 401/403 with a plain-text body and no
+        // HTML at all (e.g. a token-in-URL harness).
+        assert!(is_credible(&result(401, None)));
+        assert!(is_credible(&result(403, None)));
     }
 
     #[test]
