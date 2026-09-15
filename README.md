@@ -88,6 +88,16 @@ open it.
 > If your phone says it isn't connected later, open the app and tap the refresh
 > button; pair again only if it asks you to.
 
+### Inviting another device
+
+Already paired? You can introduce a second phone/tablet without going back to
+the computer: on the paired device open the server, tap **… → Invite Device…**,
+and let the other device scan the code it shows.
+
+The invitation is **one-time** and expires after a few minutes; whoever redeems
+it first becomes a paired device. You can disable this on the server with
+`allow_invites = false` under `[bind]`.
+
 ## Everyday use
 
 ```sh

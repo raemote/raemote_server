@@ -39,6 +39,10 @@ their machine.
 6. **Device identity at rest.** The phone's private key lives in the iOS
    Keychain, marked device-only: it is not synced to iCloud and not restored
    onto another device from a backup.
+7. **Device-to-device invitations.** A paired device can mint a **one-time**
+   invitation so it can introduce another device. The invitation is 256-bit,
+   expires quickly, is consumed on first use, and is minted only by a device
+   that is already authorized.
 
 ## What Raemote does NOT protect
 
@@ -59,6 +63,7 @@ their machine.
 | --- | --- |
 | Guessing the pairing token | 256-bit token, constant-time compare, expiry, failed-attempt lockout |
 | Stolen/expired pairing link | Short TTL; token expires and is replaceable; post-expiry reuse fails |
+| Stolen/expired invitation link | One-time (consumed on first use), short TTL, minted only by an already-authorized device |
 | Unauthorized serve connections | Device-identity allowlist; unauthorized connections closed |
 | A revoked device with an open connection | Authorization is re-checked on every request; the connection is closed |
 | Trust-store tampering/corruption | `~/.raemote` is mode `0700`; a corrupt store fails closed (deny) |
@@ -94,6 +99,13 @@ their machine.
   enough attempts to revoke the current token — a **denial of pairing, not of
   access** (existing devices keep working). Recovery is immediate: mint a fresh
   token with `raemote pair`.
+- **A compromised paired device can invite another device.** Invitations let a
+  trusted device add a new one, so a compromised phone can grant itself
+  persistence — even after you revoke *that* phone, the device it invited
+  remains. This is bounded but not eliminated: invitations are one-time and
+  short-lived, both the mint and the redemption are logged (with the inviter),
+  and the owner can revoke the invited device like any other. Set
+  `bind.allow_invites = false` to turn the feature off entirely.
 
 ## Security requirements mapping
 
