@@ -476,6 +476,16 @@ fn hostname() -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate process-global environment variables, which
+    /// otherwise race when the test harness runs them in parallel.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn default_config_valid() {
         let config = Config::default();
@@ -484,7 +494,8 @@ mod tests {
 
     #[test]
     fn env_override_applied() {
-        // SAFETY: single-threaded test, no concurrent env access
+        let _guard = env_guard();
+        // SAFETY: guarded by ENV_LOCK, no concurrent env access
         unsafe {
             std::env::set_var("RAEMOTE_BIND_TTL_SECS", "123");
         }
@@ -499,7 +510,8 @@ mod tests {
 
     #[test]
     fn env_override_invalid_ignored() {
-        // SAFETY: single-threaded test, no concurrent env access
+        let _guard = env_guard();
+        // SAFETY: guarded by ENV_LOCK, no concurrent env access
         unsafe {
             std::env::set_var("RAEMOTE_BIND_TTL_SECS", "not_a_number");
         }
@@ -587,7 +599,8 @@ mod tests {
 
     #[test]
     fn bind_token_env_override() {
-        // SAFETY: single-threaded test, no concurrent env access
+        let _guard = env_guard();
+        // SAFETY: guarded by ENV_LOCK, no concurrent env access
         unsafe {
             std::env::set_var("RAEMOTE_BIND_TOKEN", "0123456789abcdef");
         }
@@ -630,7 +643,8 @@ mod tests {
 
     #[test]
     fn discovery_env_override() {
-        // SAFETY: single-threaded test, no concurrent env access
+        let _guard = env_guard();
+        // SAFETY: guarded by ENV_LOCK, no concurrent env access
         unsafe {
             std::env::set_var("RAEMOTE_DISCOVERY_ENABLED", "false");
             std::env::set_var("RAEMOTE_DISCOVERY_INTERVAL_SECS", "45");
