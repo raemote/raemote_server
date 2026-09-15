@@ -765,4 +765,23 @@ mod tests {
         assert!(reloaded.is_authorized(node(1)));
         assert_eq!(reloaded.device_infos()[0].name, default_device_name(node(1)));
     }
+
+    #[test]
+    fn devices_are_isolated_from_each_other() {
+        // Act on one node and make sure the other's trust and name are untouched.
+        let state = test_state("device-isolation");
+        let info = state.mint_token(Duration::from_secs(60));
+        assert_eq!(state.authenticate(node(1), &info.token_hex), BindOutcome::Bound);
+        assert_eq!(state.authenticate(node(2), &info.token_hex), BindOutcome::Bound);
+        state.set_device_name(node(1), "Alpha").unwrap();
+        state.set_device_name(node(2), "Bravo").unwrap();
+
+        assert!(state.revoke(node(1)));
+
+        assert!(!state.is_authorized(node(1)));
+        assert!(state.is_authorized(node(2)));
+        let infos = state.device_infos();
+        assert!(infos.iter().any(|d| d.node_id == node(2) && d.name == "Bravo"));
+        assert!(!infos.iter().any(|d| d.node_id == node(1)));
+    }
 }

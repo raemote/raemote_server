@@ -81,6 +81,19 @@ their machine.
 - **Local host trust.** A local attacker who can read the owner's files can read
   the server key. This is unavoidable for a user-run agent; protect your home
   directory.
+- **Per-client state is keyed by node id.** The trusted set, device names, and
+  the per-device rate limiter are all keyed on `EndpointId`, and a client's
+  identity comes from the authenticated iroh connection (`remote_id`), not from
+  anything it sends — so two paired devices can never be confused for one
+  another.
+- **Pairing lockout is server-wide.** The one piece of state shared across all
+  clients is the (single) active pairing token and its failed-attempt counter.
+  That is deliberate: a client identity is cheap to regenerate, so a
+  per-device counter would be trivially bypassed. The consequence is that
+  someone who can reach the bind ALPN and knows the server node id could fail
+  enough attempts to revoke the current token — a **denial of pairing, not of
+  access** (existing devices keep working). Recovery is immediate: mint a fresh
+  token with `raemote pair`.
 
 ## Security requirements mapping
 
