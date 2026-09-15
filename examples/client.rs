@@ -72,6 +72,11 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        "ws" => {
+            let node = args.next().context(usage())?;
+            let path = args.next().unwrap_or_else(|| "/app/app/socket".to_string());
+            ws(&endpoint, parse_node(&node)?, &path).await
+        }
         _ => Err(anyhow::anyhow!(usage())),
     }
 }
@@ -92,6 +97,71 @@ async fn bind(endpoint: &Endpoint, node: EndpointId, token: &str) -> Result<()> 
         .await
         .context("failed to read bind reply")?;
     print!("{}", String::from_utf8_lossy(&reply));
+    Ok(())
+}
+
+async fn ws(endpoint: &Endpoint, node: EndpointId, path: &str) -> Result<()> {
+    let connection = endpoint
+        .connect(node, SERVE_ALPN)
+        .await
+        .context("failed to connect")?;
+    let (mut send, mut recv) = connection.open_bi().await?;
+
+    // RFC 6455 handshake (key from the RFC example).
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: raemote\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    send.write_all(request.as_bytes()).await?;
+
+    // Read the response head.
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        let n = recv.read(&mut tmp).await?.unwrap_or(0);
+        if n == 0 {
+            anyhow::bail!("connection closed during handshake");
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            println!("--- handshake ---\n{}", String::from_utf8_lossy(&buf[..pos + 4]));
+            buf = buf[pos + 4..].to_vec();
+            break;
+        }
+    }
+
+    // Send a masked text frame "hello".
+    let payload = b"hello";
+    let mask = [0x12u8, 0x34, 0x56, 0x78];
+    let mut frame = vec![0x81u8, 0x80 | payload.len() as u8];
+    frame.extend_from_slice(&mask);
+    for (i, byte) in payload.iter().enumerate() {
+        frame.push(byte ^ mask[i % 4]);
+    }
+    send.write_all(&frame).await?;
+
+    // Read the (unmasked) echo frame.
+    while buf.len() < 2 {
+        let n = recv.read(&mut tmp).await?.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    if buf.len() >= 2 {
+        let len = (buf[1] & 0x7f) as usize;
+        while buf.len() < 2 + len {
+            let n = recv.read(&mut tmp).await?.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        if buf.len() >= 2 + len {
+            println!("--- echo ---\n{}", String::from_utf8_lossy(&buf[2..2 + len]));
+        }
+    }
+
+    send.finish()?;
     Ok(())
 }
 
@@ -190,5 +260,5 @@ fn client_key_path() -> Result<PathBuf> {
 }
 
 fn usage() -> String {
-    "usage: client bind <node-id> <token> | client bind <raemote://bind?...> | client get <node-id> [path] | client request <node-id> <METHOD> <path> [json-body|-] [Header: value]...".to_string()
+    "usage: client bind <node-id> <token> | client bind <raemote://bind?...> | client get <node-id> [path] | client request <node-id> <METHOD> <path> [json-body|-] [Header: value]... | client ws <node-id> <path>".to_string()
 }

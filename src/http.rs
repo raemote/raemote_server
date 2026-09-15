@@ -24,6 +24,7 @@ use iroh::endpoint::{Connection, VarInt};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::EndpointId;
 use leaky_bucket::RateLimiter;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::auth::{default_device_name, sanitize_device_name, AuthState};
@@ -282,6 +283,9 @@ pub async fn serve_stream(
     if let Err(err) = hyper::server::conn::http1::Builder::new()
         .half_close(true)
         .serve_connection(TokioIo::new(stream), service)
+        // Required for WebSocket/upgrade support; plain `serve_connection`
+        // can't perform upgrades.
+        .with_upgrades()
         .await
     {
         tracing::debug!("stream closed: {err}");
@@ -479,12 +483,159 @@ async fn rename_self(
     }
 }
 
+/// Tunnel an upgrade (WebSocket) request to the origin and splice the two
+/// connections.
+///
+/// The upstream handshake runs over a raw TCP socket (hyper's client upgrade
+/// path is restrictive); the client side uses hyper's server upgrade, so bytes
+/// flow untouched in both directions once the 101 is returned.
+async fn proxy_upgrade(
+    mut req: Request<Incoming>,
+    origin: &Origin,
+    sub_path: &str,
+) -> Result<Response<ResBody>, io::Error> {
+    // Register the client-side upgrade before consuming the request.
+    let client_upgrade = hyper::upgrade::on(&mut req);
+
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("/{sub_path}{query}");
+
+    // Rebuild the request head for the origin, keeping the upgrade headers.
+    let mut head = format!("{} {} HTTP/1.1\r\n", req.method(), target);
+    head.push_str(&format!("Host: {}\r\n", origin.authority()));
+    for (name, value) in req.headers().iter() {
+        if name.as_str() == "host" {
+            continue;
+        }
+        let Ok(text) = value.to_str() else { continue };
+        let line = match name.as_str() {
+            "origin" => format!("origin: {}", rewrite_origin(text, origin)),
+            "referer" => format!("referer: {}", rewrite_referer(text, origin)),
+            other => format!("{other}: {text}"),
+        };
+        head.push_str(&line);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+
+    tracing::info!(
+        upstream = %format!("{}://{}{}", origin.scheme.as_str(), origin.authority(), target),
+        "proxying upgrade"
+    );
+
+    let mut upstream = tokio::net::TcpStream::connect((origin.host.as_str(), origin.port))
+        .await
+        .map_err(io::Error::other)?;
+    upstream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(io::Error::other)?;
+
+    // Read the origin's response head (through CRLFCRLF).
+    let mut buf = Vec::with_capacity(1024);
+    let mut tmp = [0u8; 1024];
+    let head_end = loop {
+        let n = upstream.read(&mut tmp).await.map_err(io::Error::other)?;
+        if n == 0 {
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "the app closed the connection before completing the upgrade",
+                None,
+            ));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        if buf.len() > 64 * 1024 {
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "the app sent an oversized upgrade response",
+                None,
+            ));
+        }
+    };
+
+    let head_text = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let status_line = head_text.lines().next().unwrap_or("");
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(502);
+    let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY);
+
+    if status != StatusCode::SWITCHING_PROTOCOLS {
+        tracing::warn!(%status, "upstream refused the upgrade");
+        return Ok(error_response(
+            status,
+            "upgrade_refused",
+            "the app refused the WebSocket upgrade",
+            Some(status_line),
+        ));
+    }
+
+    // Return the 101 with the origin's headers so hyper performs the upgrade.
+    let mut builder = Response::builder().status(status);
+    {
+        let headers = builder.headers_mut().expect("fresh builder");
+        for line in head_text.split("\r\n").skip(1) {
+            if let Some((key, value)) = line.split_once(':') {
+                let (Ok(name), Ok(value)) = (
+                    hyper::header::HeaderName::from_bytes(key.trim().as_bytes()),
+                    hyper::header::HeaderValue::from_str(value.trim()),
+                ) else {
+                    continue;
+                };
+                headers.append(name, value);
+            }
+        }
+    }
+    let response = builder.body(full(Bytes::new())).map_err(io::Error::other)?;
+
+    // Bytes past the head arrived before the handover; forward them first.
+    let leftover = buf[head_end..].to_vec();
+
+    tokio::spawn(async move {
+        let upgraded = match client_upgrade.await {
+            Ok(upgraded) => upgraded,
+            Err(err) => {
+                tracing::debug!(?err, "client upgrade failed");
+                return;
+            }
+        };
+        let mut client = TokioIo::new(upgraded);
+        if !leftover.is_empty()
+            && let Err(err) = client.write_all(&leftover).await
+        {
+            tracing::debug!(?err, "failed to flush post-upgrade bytes");
+            return;
+        }
+        match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+            Ok((to_client, to_upstream)) => {
+                tracing::debug!(to_client, to_upstream, "upgrade tunnel closed")
+            }
+            Err(err) => tracing::debug!(?err, "upgrade tunnel error"),
+        }
+    });
+
+    Ok(response)
+}
+
 async fn proxy(
     state: &AppState,
     req: Request<Incoming>,
     origin: &Origin,
     sub_path: &str,
 ) -> Result<Response<ResBody>, io::Error> {
+    // WebSocket and other upgrades can't go through the buffered hyper client;
+    // tunnel them raw once the handshake succeeds.
+    if req.headers().contains_key(hyper::header::UPGRADE) {
+        return proxy_upgrade(req, origin, sub_path).await;
+    }
+
     let query = req
         .uri()
         .query()
