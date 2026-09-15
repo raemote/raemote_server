@@ -44,6 +44,13 @@ This downloads the latest release, installs the `raemote` command into
 `~/.local/bin`, and sets up a background service so it keeps running and starts
 again when you log in.
 
+On networks where GitHub is slow or unreliable, use the Gitee mirror instead —
+the installer then prefers the Gitee release rather than reaching for GitHub:
+
+```sh
+curl -fsSL https://gitee.com/pppkin/raemote_server/raw/main/install.sh | sh
+```
+
 Prefer to inspect first? It's fine to download and read the script before
 running it:
 

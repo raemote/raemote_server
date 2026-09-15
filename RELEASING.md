@@ -36,7 +36,22 @@ root. Asset names omit the version so `releases/latest/download/<asset>` works.
 
 4. Sanity-check the release page: four tarballs + `checksums.txt`.
 
-5. Verify the one-liner on a clean machine (fresh `HOME` is enough):
+5. **Mirror the same five assets to a Gitee release** for the tag
+   (`pppkin/raemote_server`). The installer prefers Gitee, and GitHub is
+   unreliable on some networks (mainland China especially), so a release that
+   only exists on GitHub makes the one-liner fall back to a flaky path — or
+   fail. Download the assets from the GitHub release and attach them to a Gitee
+   release for the same tag:
+
+   ```sh
+   gh release download v0.1.0 --dir dist --clobber   # or use scripts/package.sh
+   # then attach dist/* to a Gitee release (web UI, or the Gitee API)
+   ```
+
+   Gitee release assets don't need re-signing — `checksums.txt` covers the
+   tarballs and the installer verifies it whichever source it used.
+
+6. Verify the one-liner on a clean machine (fresh `HOME` is enough):
 
    ```sh
    curl -fsSL https://github.com/raemote/raemote_server/raw/main/install.sh | sh
@@ -44,7 +59,8 @@ root. Asset names omit the version so `releases/latest/download/<asset>` works.
    ```
 
    (If only GitHub has the release, the installer falls back to it
-   automatically.)
+   automatically. Test both entry points when it matters:
+   `https://gitee.com/pppkin/raemote_server/raw/main/install.sh`.)
 
 ## Manual fallback
 
