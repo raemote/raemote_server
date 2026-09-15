@@ -52,14 +52,25 @@ async fn main() -> Result<()> {
             let path = args
                 .next()
                 .unwrap_or_else(|| "/_hub/catalog".to_string());
-            request(&endpoint, parse_node(&node)?, "GET", &path, None).await
+            request(&endpoint, parse_node(&node)?, "GET", &path, None, &[]).await
         }
         "request" => {
             let node = args.next().context(usage())?;
             let method = args.next().unwrap_or_else(|| "GET".to_string());
             let path = args.next().unwrap_or_else(|| "/".to_string());
-            let body = args.next();
-            request(&endpoint, parse_node(&node)?, &method, &path, body.as_deref()).await
+            // "-" means no body; remaining args are extra "Header: value" lines.
+            let body_arg = args.next();
+            let body = body_arg.as_deref().filter(|b| *b != "-");
+            let headers: Vec<String> = args.collect();
+            request(
+                &endpoint,
+                parse_node(&node)?,
+                &method,
+                &path,
+                body,
+                &headers,
+            )
+            .await
         }
         _ => Err(anyhow::anyhow!(usage())),
     }
@@ -90,6 +101,7 @@ async fn request(
     method: &str,
     path: &str,
     body: Option<&str>,
+    extra_headers: &[String],
 ) -> Result<()> {
     let connection = endpoint
         .connect(node, SERVE_ALPN)
@@ -103,6 +115,10 @@ async fn request(
     if let Some(body) = body {
         request.push_str("Content-Type: application/json\r\n");
         request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    for header in extra_headers {
+        request.push_str(header);
+        request.push_str("\r\n");
     }
     request.push_str("\r\n");
     if let Some(body) = body {
@@ -174,5 +190,5 @@ fn client_key_path() -> Result<PathBuf> {
 }
 
 fn usage() -> String {
-    "usage: client bind <node-id> <token> | client bind <raemote://bind?...> | client get <node-id> [path] | client request <node-id> <METHOD> <path> [json-body]".to_string()
+    "usage: client bind <node-id> <token> | client bind <raemote://bind?...> | client get <node-id> [path] | client request <node-id> <METHOD> <path> [json-body|-] [Header: value]...".to_string()
 }

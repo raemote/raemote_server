@@ -509,6 +509,19 @@ async fn proxy(
             if name.as_str() == "host" || is_hop_by_hop(name.as_str()) {
                 continue;
             }
+            // Point loopback Origin/Referer at the upstream so the app's own
+            // CSRF checks pass.
+            if let ("origin" | "referer", Ok(text)) = (name.as_str(), value.to_str()) {
+                let rewritten = if name.as_str() == "origin" {
+                    rewrite_origin(text, origin)
+                } else {
+                    rewrite_referer(text, origin)
+                };
+                if let Ok(header) = hyper::header::HeaderValue::from_str(&rewritten) {
+                    headers.append(name, header);
+                    continue;
+                }
+            }
             headers.append(name, value.clone());
         }
     }
@@ -522,6 +535,14 @@ async fn proxy(
             for (name, value) in parts.headers.iter() {
                 if name.as_str() == "host" || is_hop_by_hop(name.as_str()) {
                     continue;
+                }
+                // Keep absolute redirects on the loopback origin.
+                if let ("location", Ok(text)) = (name.as_str(), value.to_str()) {
+                    let rewritten = rewrite_location(text, origin);
+                    if let Ok(header) = hyper::header::HeaderValue::from_str(&rewritten) {
+                        headers.append(name, header);
+                        continue;
+                    }
                 }
                 headers.append(name, value.clone());
             }
@@ -558,6 +579,76 @@ fn is_hop_by_hop(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+/// The upstream base URL for an origin (`http://host:port`).
+fn upstream_base(origin: &Origin) -> String {
+    format!("{}://{}", origin.scheme.as_str(), origin.authority())
+}
+
+/// Whether a host string refers to the local machine (client loopback).
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// Rewrite a client `Origin` header to the upstream origin.
+///
+/// The web view sends its loopback origin; apps that validate `Origin` against
+/// their own host would otherwise reject state-changing requests.
+fn rewrite_origin(value: &str, origin: &Origin) -> String {
+    match url::Url::parse(value) {
+        Ok(url) if url.host_str().is_some_and(is_loopback_host) => upstream_base(origin),
+        _ => value.to_string(),
+    }
+}
+
+/// Rewrite a client `Referer` to the upstream origin, keeping the path/query.
+fn rewrite_referer(value: &str, origin: &Origin) -> String {
+    match url::Url::parse(value) {
+        Ok(url) if url.host_str().is_some_and(is_loopback_host) => {
+            let mut out = upstream_base(origin);
+            out.push_str(url.path());
+            if let Some(query) = url.query() {
+                out.push('?');
+                out.push_str(query);
+            }
+            out
+        }
+        _ => value.to_string(),
+    }
+}
+
+/// Rewrite an absolute `Location` that points back at the origin into a
+/// relative one, so the client stays on the loopback origin instead of dialing
+/// the machine's real address.
+fn rewrite_location(value: &str, origin: &Origin) -> String {
+    let Ok(url) = url::Url::parse(value) else {
+        return value.to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return value.to_string();
+    };
+    let same_host = host.eq_ignore_ascii_case(&origin.host)
+        || (is_loopback_host(host) && is_loopback_host(&origin.host));
+    let same_port = url.port_or_known_default() == Some(origin.port);
+    if !(same_host && same_port) {
+        return value.to_string();
+    }
+
+    let mut out = url.path().to_string();
+    if out.is_empty() {
+        out.push('/');
+    }
+    if let Some(query) = url.query() {
+        out.push('?');
+        out.push_str(query);
+    }
+    if let Some(fragment) = url.fragment() {
+        out.push('#');
+        out.push_str(fragment);
+    }
+    out
 }
 
 fn json_response(status: StatusCode, value: serde_json::Value) -> Response<ResBody> {
@@ -607,6 +698,65 @@ mod tests {
         let without_hint = error_body("not_found", "no such route", None);
         assert_eq!(without_hint["code"], "not_found");
         assert!(without_hint.get("hint").is_none());
+    }
+
+    #[test]
+    fn rewrites_absolute_location_to_relative() {
+        let origin = Origin::http("127.0.0.1", 8096);
+        assert_eq!(
+            rewrite_location("http://127.0.0.1:8096/web/index.html", &origin),
+            "/web/index.html"
+        );
+        assert_eq!(rewrite_location("http://127.0.0.1:8096/", &origin), "/");
+        assert_eq!(
+            rewrite_location("http://127.0.0.1:8096/a?b=c#d", &origin),
+            "/a?b=c#d"
+        );
+        // Loopback alias of the same host/port is also rewritten.
+        assert_eq!(rewrite_location("http://localhost:8096/x", &origin), "/x");
+        // Other host or port stays absolute.
+        assert_eq!(
+            rewrite_location("http://127.0.0.1:9999/x", &origin),
+            "http://127.0.0.1:9999/x"
+        );
+        assert_eq!(
+            rewrite_location("https://example.com/x", &origin),
+            "https://example.com/x"
+        );
+        // Already-relative stays as-is.
+        assert_eq!(rewrite_location("/already", &origin), "/already");
+    }
+
+    #[test]
+    fn rewrites_location_for_lan_origin() {
+        let origin = Origin::http("192.168.1.5", 8123);
+        assert_eq!(
+            rewrite_location("http://192.168.1.5:8123/panel", &origin),
+            "/panel"
+        );
+        assert_eq!(
+            rewrite_location("http://192.168.1.9:8123/panel", &origin),
+            "http://192.168.1.9:8123/panel"
+        );
+    }
+
+    #[test]
+    fn rewrites_loopback_origin_and_referer() {
+        let origin = Origin::http("127.0.0.1", 8096);
+        assert_eq!(
+            rewrite_origin("http://127.0.0.1:5523", &origin),
+            "http://127.0.0.1:8096"
+        );
+        assert_eq!(
+            rewrite_origin("http://localhost:1234", &origin),
+            "http://127.0.0.1:8096"
+        );
+        // Non-loopback origins are left alone.
+        assert_eq!(rewrite_origin("https://example.com", &origin), "https://example.com");
+        assert_eq!(
+            rewrite_referer("http://127.0.0.1:5523/web/index.html", &origin),
+            "http://127.0.0.1:8096/web/index.html"
+        );
     }
 
     #[test]
