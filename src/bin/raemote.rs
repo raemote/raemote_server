@@ -977,6 +977,9 @@ fn cmd_config_get(key: &str) -> Result<()> {
         "bind.token_ttl_secs" => Some(cfg.bind.token_ttl_secs.to_string()),
         "bind.max_failed_attempts" => Some(cfg.bind.max_failed_attempts.to_string()),
         "bind.max_concurrent_connections" => Some(cfg.bind.max_concurrent_connections.to_string()),
+        "bind.allow_invites" => Some(cfg.bind.allow_invites.to_string()),
+        "bind.invite_ttl_secs" => Some(cfg.bind.invite_ttl_secs.to_string()),
+        "bind.max_pending_invites" => Some(cfg.bind.max_pending_invites.to_string()),
         "serve.max_concurrent_streams" => Some(cfg.serve.max_concurrent_streams.to_string()),
         "serve.rate_limit.refill" => Some(cfg.serve.rate_limit.refill.to_string()),
         "serve.rate_limit.interval_ms" => Some(cfg.serve.rate_limit.interval_ms.to_string()),
@@ -1006,6 +1009,15 @@ async fn cmd_config_set(key: &str, value: &str) -> Result<()> {
         }
         "bind.max_concurrent_connections" => {
             cfg.bind.max_concurrent_connections = value.parse().context("invalid value")?;
+        }
+        "bind.allow_invites" => {
+            cfg.bind.allow_invites = value.parse().context("invalid value")?;
+        }
+        "bind.invite_ttl_secs" => {
+            cfg.bind.invite_ttl_secs = value.parse().context("invalid value")?;
+        }
+        "bind.max_pending_invites" => {
+            cfg.bind.max_pending_invites = value.parse().context("invalid value")?;
         }
         "serve.max_concurrent_streams" => {
             cfg.serve.max_concurrent_streams = value.parse().context("invalid value")?;

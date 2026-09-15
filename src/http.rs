@@ -94,19 +94,26 @@ pub struct AppState {
     client: Client<HttpConnector, ResBody>,
     config: Arc<RwLock<Config>>,
     catalog: Arc<RwLock<Catalog>>,
+    /// This server's own node id, needed to build pairing/invitation URIs.
+    node_id: EndpointId,
     discovery: Option<DiscoveryHandle>,
 }
 
 impl AppState {
     /// Build state without a discovery handle.
-    pub fn new(config: Arc<RwLock<Config>>, catalog: Arc<RwLock<Catalog>>) -> Self {
-        Self::with_discovery(config, catalog, None)
+    pub fn new(
+        config: Arc<RwLock<Config>>,
+        catalog: Arc<RwLock<Catalog>>,
+        node_id: EndpointId,
+    ) -> Self {
+        Self::with_discovery(config, catalog, node_id, None)
     }
 
     /// Build state, optionally wired to the discovery engine.
     pub fn with_discovery(
         config: Arc<RwLock<Config>>,
         catalog: Arc<RwLock<Catalog>>,
+        node_id: EndpointId,
         discovery: Option<DiscoveryHandle>,
     ) -> Self {
         let client = Client::builder(TokioExecutor::new()).build_http();
@@ -114,6 +121,7 @@ impl AppState {
             client,
             config,
             catalog,
+            node_id,
             discovery,
         }
     }
@@ -335,6 +343,18 @@ async fn handle(
         ));
     }
 
+    if path == "/_hub/invite" {
+        if method == Method::POST {
+            return Ok(create_invite(&state, &auth, node));
+        }
+        return Ok(error_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "use POST to create an invitation",
+            None,
+        ));
+    }
+
     if let Some(rest) = path.strip_prefix("/app/") {
         let mut segments = rest.splitn(2, '/');
         let name = segments.next().unwrap_or_default();
@@ -480,6 +500,48 @@ async fn rename_self(
         Err(err) => {
             error_response(StatusCode::BAD_REQUEST, "bad_request", &err.to_string(), None)
         }
+    }
+}
+
+/// `POST /_hub/invite`: mint a one-time invitation so this (authorized) device
+/// can introduce another device to the server. Whoever redeems the returned
+/// link first becomes an authorized device; the invitation is then consumed.
+fn create_invite(state: &AppState, auth: &AuthState, node: EndpointId) -> Response<ResBody> {
+    let (allow, ttl_secs, max_pending) = {
+        let cfg = state.config.read().expect("config poisoned");
+        (
+            cfg.bind.allow_invites,
+            cfg.bind.invite_ttl_secs,
+            cfg.bind.max_pending_invites,
+        )
+    };
+
+    if !allow {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "invites_disabled",
+            "invitations are disabled on this server",
+            Some("set bind.allow_invites = true to enable them"),
+        );
+    }
+
+    match auth.mint_invitation(Duration::from_secs(ttl_secs), node, max_pending) {
+        Ok(info) => {
+            tracing::info!(node = %node.fmt_short(), "invitation requested");
+            json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "uri": info.uri(state.node_id),
+                    "expires_at_unix": info.expires_at_unix,
+                }),
+            )
+        }
+        Err(err) => error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_invites",
+            &err.to_string(),
+            Some("wait for an outstanding invitation to expire or be used"),
+        ),
     }
 }
 
@@ -839,6 +901,10 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn test_node_id() -> EndpointId {
+        iroh::SecretKey::from_bytes(&[7; 32]).public()
+    }
+
     #[test]
     fn error_body_has_code_and_optional_hint() {
         let with_hint = error_body("unknown_app", "unknown app \"x\"", Some("refresh the list"));
@@ -946,7 +1012,7 @@ mod tests {
     fn serve_handler_get_or_create_limiter() {
         let config = Arc::new(RwLock::new(Config::default()));
         let catalog = Arc::new(RwLock::new(Catalog::empty()));
-        let state = Arc::new(AppState::new(config, catalog));
+        let state = Arc::new(AppState::new(config, catalog, test_node_id()));
         let auth = Arc::new(AuthState::load(10).unwrap());
         let config_generation = Arc::new(AtomicU64::new(0));
         let handler = ServeHandler::new(
@@ -968,7 +1034,7 @@ mod tests {
     fn limiter_cache_invalidated_on_reload() {
         let config = Arc::new(RwLock::new(Config::default()));
         let catalog = Arc::new(RwLock::new(Catalog::empty()));
-        let state = Arc::new(AppState::new(config.clone(), catalog));
+        let state = Arc::new(AppState::new(config.clone(), catalog, test_node_id()));
         let auth = Arc::new(AuthState::load(10).unwrap());
         let config_generation = Arc::new(AtomicU64::new(0));
         let handler = ServeHandler::new(

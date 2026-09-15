@@ -12,7 +12,7 @@
 //! and thus the authorization — survives across runs.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
@@ -26,10 +26,22 @@ const BIND_ALPN: &[u8] = b"raemote/bind/0";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut args = env::args().skip(1);
+    // Optional `--key <path>` (or RAEMOTE_CLIENT_KEY) lets two identities run
+    // at once, which is how the invitation flow is tested end to end.
+    let mut argv: Vec<String> = env::args().skip(1).collect();
+    let mut key_path: Option<PathBuf> = std::env::var_os("RAEMOTE_CLIENT_KEY").map(PathBuf::from);
+    if let Some(pos) = argv.iter().position(|arg| arg == "--key") {
+        if pos + 1 >= argv.len() {
+            anyhow::bail!("--key needs a path");
+        }
+        key_path = Some(PathBuf::from(argv.remove(pos + 1)));
+        argv.remove(pos);
+    }
+
+    let mut args = argv.into_iter();
     let command = args.next().context(usage())?;
 
-    let secret_key = load_or_create_client_key()?;
+    let secret_key = load_or_create_client_key(key_path.as_deref())?;
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .bind()
@@ -233,8 +245,11 @@ fn parse_node(s: &str) -> Result<EndpointId> {
     EndpointId::from_str(s).context("invalid node id")
 }
 
-fn load_or_create_client_key() -> Result<SecretKey> {
-    let path = client_key_path()?;
+fn load_or_create_client_key(explicit: Option<&Path>) -> Result<SecretKey> {
+    let path = match explicit {
+        Some(path) => path.to_path_buf(),
+        None => client_key_path()?,
+    };
     if path.exists() {
         let bytes = std::fs::read(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -260,5 +275,5 @@ fn client_key_path() -> Result<PathBuf> {
 }
 
 fn usage() -> String {
-    "usage: client bind <node-id> <token> | client bind <raemote://bind?...> | client get <node-id> [path] | client request <node-id> <METHOD> <path> [json-body|-] [Header: value]... | client ws <node-id> <path>".to_string()
+    "usage: client bind <node-id> <token> | client bind <raemote://bind?...> | client get <node-id> [path] | client request <node-id> <METHOD> <path> [json-body|-] [Header: value]... | client ws <node-id> <path>   [--key <path>]".to_string()
 }

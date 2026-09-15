@@ -75,6 +75,28 @@ pub struct BindConfig {
     /// when it is no longer needed.
     #[serde(default)]
     pub token: Option<String>,
+    /// Whether an authorized device may mint one-time invitations that pair
+    /// another device (device-to-device onboarding).
+    #[serde(default = "default_true")]
+    pub allow_invites: bool,
+    /// Lifetime of a one-time invitation, in seconds.
+    #[serde(default = "default_invite_ttl_secs")]
+    pub invite_ttl_secs: u64,
+    /// Maximum number of outstanding invitations at once.
+    #[serde(default = "default_max_pending_invites")]
+    pub max_pending_invites: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_invite_ttl_secs() -> u64 {
+    300
+}
+
+fn default_max_pending_invites() -> usize {
+    3
 }
 
 impl Default for BindConfig {
@@ -84,6 +106,9 @@ impl Default for BindConfig {
             max_failed_attempts: 10,
             max_concurrent_connections: 50,
             token: None,
+            allow_invites: true,
+            invite_ttl_secs: default_invite_ttl_secs(),
+            max_pending_invites: default_max_pending_invites(),
         }
     }
 }
@@ -279,6 +304,15 @@ fn env_override(config: &mut Config) {
         &mut config.bind.max_concurrent_connections,
         "RAEMOTE_MAX_BIND_CONNECTIONS",
     );
+    override_from_env(&mut config.bind.allow_invites, "RAEMOTE_BIND_ALLOW_INVITES");
+    override_from_env(
+        &mut config.bind.invite_ttl_secs,
+        "RAEMOTE_BIND_INVITE_TTL_SECS",
+    );
+    override_from_env(
+        &mut config.bind.max_pending_invites,
+        "RAEMOTE_BIND_MAX_INVITES",
+    );
     override_from_env(
         &mut config.serve.max_concurrent_streams,
         "RAEMOTE_MAX_CONCURRENT_STREAMS",
@@ -330,6 +364,12 @@ pub fn validate(config: &Config) -> Result<()> {
     }
     if config.bind.max_concurrent_connections == 0 {
         errors.push("bind.max_concurrent_connections must be > 0".into());
+    }
+    if config.bind.invite_ttl_secs == 0 {
+        errors.push("bind.invite_ttl_secs must be > 0".into());
+    }
+    if config.bind.max_pending_invites == 0 {
+        errors.push("bind.max_pending_invites must be > 0".into());
     }
     if config.serve.max_concurrent_streams == 0 {
         errors.push("serve.max_concurrent_streams must be > 0".into());
@@ -396,6 +436,11 @@ pub fn default_toml() -> &'static str {
 token_ttl_secs = 300
 max_failed_attempts = 10
 max_concurrent_connections = 50
+# Allow an already-paired device to invite another device (one-time link).
+allow_invites = true
+# Lifetime of a one-time invitation, and how many can be outstanding.
+invite_ttl_secs = 300
+max_pending_invites = 3
 # Fixed pairing token (optional). When set, the pairing link is stable across
 # restarts and lives as long as token_ttl_secs. Treat it as a long-lived secret.
 # token = "0123456789abcdef... (64+ random hex chars)"

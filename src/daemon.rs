@@ -276,6 +276,7 @@ pub async fn run() -> Result<()> {
     let state = Arc::new(AppState::with_discovery(
         config.clone(),
         catalog.clone(),
+        endpoint.id(),
         Some(crate::http::DiscoveryHandle {
             trigger: discovery_trigger.clone(),
             generation: catalog_generation.clone(),

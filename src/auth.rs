@@ -21,6 +21,8 @@ use crate::identity;
 pub enum BindOutcome {
     /// The node was newly authorized and persisted.
     Bound,
+    /// The node was newly authorized by redeeming a one-time invitation.
+    BoundViaInvitation,
     /// The node was already authorized; nothing changed.
     AlreadyAuthorized,
     /// No token is active (never minted, expired, or revoked).
@@ -34,7 +36,10 @@ pub enum BindOutcome {
 impl BindOutcome {
     /// Whether the attempt grants access.
     pub fn is_allowed(&self) -> bool {
-        matches!(self, BindOutcome::Bound | BindOutcome::AlreadyAuthorized)
+        matches!(
+            self,
+            BindOutcome::Bound | BindOutcome::BoundViaInvitation | BindOutcome::AlreadyAuthorized
+        )
     }
 
     /// A short reason to send back when the attempt is denied.
@@ -43,7 +48,9 @@ impl BindOutcome {
             BindOutcome::NoActiveToken => "no active token",
             BindOutcome::TokenMismatch => "invalid token",
             BindOutcome::Revoked => "token revoked",
-            BindOutcome::Bound | BindOutcome::AlreadyAuthorized => "",
+            BindOutcome::Bound
+            | BindOutcome::BoundViaInvitation
+            | BindOutcome::AlreadyAuthorized => "",
         }
     }
 }
@@ -146,6 +153,8 @@ struct Inner {
     authenticated: HashSet<EndpointId>,
     /// Display-only names for authorized devices.
     names: HashMap<EndpointId, String>,
+    /// Outstanding one-time invitations, keyed by their token (hex).
+    invitations: HashMap<String, Invitation>,
     failed_attempts: u32,
 }
 
@@ -156,6 +165,15 @@ struct PendingToken {
     /// Wall-clock expiry captured at mint time, so the value embedded in the
     /// pairing URI does not drift as time passes.
     expires_at_unix: u64,
+}
+
+/// A one-time invitation: whoever redeems it first becomes an authorized
+/// device. Held only in memory, so a restart invalidates outstanding invites.
+#[derive(Debug)]
+struct Invitation {
+    expires_at: Instant,
+    /// The already-authorized device that asked for this invitation.
+    created_by: EndpointId,
 }
 
 impl AuthState {
@@ -191,6 +209,7 @@ impl AuthState {
                 pending: None,
                 authenticated,
                 names,
+                invitations: HashMap::new(),
                 failed_attempts: 0,
             }),
             store_path,
@@ -366,7 +385,47 @@ impl AuthState {
         info
     }
 
+    /// Mint a one-time invitation: the first device to redeem it becomes
+    /// authorized, and the invitation is consumed. Bounded by `max_pending` so
+    /// a device can't pile up capabilities.
+    pub fn mint_invitation(
+        &self,
+        ttl: Duration,
+        created_by: EndpointId,
+        max_pending: usize,
+    ) -> Result<TokenInfo> {
+        let ttl = ttl.min(Self::MAX_TTL);
+        let mut inner = self.inner.lock().expect("auth state poisoned");
+        let now = Instant::now();
+        inner
+            .invitations
+            .retain(|_, invitation| now < invitation.expires_at);
+        if inner.invitations.len() >= max_pending.max(1) {
+            anyhow::bail!("too many outstanding invitations");
+        }
+
+        let token: [u8; 32] = rand::random();
+        let token_hex = to_hex(&token);
+        let info = TokenInfo {
+            token_hex: token_hex.clone(),
+            expires_at_unix: unix_now().saturating_add(ttl.as_secs()),
+            ttl,
+        };
+        inner.invitations.insert(
+            token_hex,
+            Invitation {
+                expires_at: now + ttl,
+                created_by,
+            },
+        );
+        tracing::info!(inviter = %created_by.fmt_short(), "minted a one-time invitation");
+        Ok(info)
+    }
+
     /// Validate a bind attempt and authorize the node on success.
+    ///
+    /// Accepts either the multi-use pairing token or a one-time invitation.
+    /// Everything runs under one lock, so an invitation can't be redeemed twice.
     pub fn authenticate(&self, node: EndpointId, presented: &str) -> BindOutcome {
         let mut inner = self.inner.lock().expect("auth state poisoned");
 
@@ -374,45 +433,78 @@ impl AuthState {
             return BindOutcome::AlreadyAuthorized;
         }
 
-        // Snapshot the active, unexpired token (cloned: cheap and bind attempts are rare).
+        let now = Instant::now();
+        // Drop expired invitations; there are at most a handful.
+        inner
+            .invitations
+            .retain(|_, invitation| now < invitation.expires_at);
+
+        // 1. The multi-use pairing token (valid until it expires).
         let active = inner
             .pending
             .as_ref()
-            .filter(|p| Instant::now() < p.expires_at)
-            .map(|p| p.token_hex.clone());
+            .filter(|pending| now < pending.expires_at)
+            .map(|pending| pending.token_hex.clone());
 
-        match active {
-            None => {
-                // Absent or expired: drop it so later attempts fail fast.
-                inner.pending = None;
-                BindOutcome::NoActiveToken
+        if let Some(token_hex) = active.as_deref()
+            && constant_time_eq(presented.as_bytes(), token_hex.as_bytes())
+        {
+            let entries = Self::authorize(&mut inner, node);
+            drop(inner);
+            if let Err(err) = save_authorized(&self.store_path, &entries) {
+                tracing::warn!("failed to persist authorized nodes: {err:#}");
             }
-            Some(token_hex) => {
-                if constant_time_eq(presented.as_bytes(), token_hex.as_bytes()) {
-                    inner.authenticated.insert(node);
-                    inner.failed_attempts = 0;
-                    let entries: Vec<String> =
-                        inner.authenticated.iter().map(|id| id.to_string()).collect();
-                    drop(inner);
-                    if let Err(err) = save_authorized(&self.store_path, &entries) {
-                        tracing::warn!("failed to persist authorized nodes: {err:#}");
-                    }
-                    BindOutcome::Bound
-                } else {
-                    inner.failed_attempts += 1;
-                    if inner.failed_attempts >= self.max_attempts.load(Ordering::Relaxed) {
-                        inner.pending = None;
-                        tracing::warn!(
-                            attempts = inner.failed_attempts,
-                            "bind token revoked after too many failed attempts"
-                        );
-                        BindOutcome::Revoked
-                    } else {
-                        BindOutcome::TokenMismatch
-                    }
-                }
+            return BindOutcome::Bound;
+        }
+
+        // 2. One-time invitations. Scan every entry (constant-time each, with no
+        //    early exit) so which one matched isn't leaked.
+        let mut matched = None;
+        for (token_hex, invitation) in &inner.invitations {
+            if constant_time_eq(presented.as_bytes(), token_hex.as_bytes()) {
+                matched = Some((token_hex.clone(), invitation.created_by));
             }
         }
+        if let Some((token_hex, created_by)) = matched {
+            inner.invitations.remove(&token_hex);
+            let entries = Self::authorize(&mut inner, node);
+            tracing::info!(
+                node = %node.fmt_short(),
+                inviter = %created_by.fmt_short(),
+                "device authorized via one-time invitation"
+            );
+            drop(inner);
+            if let Err(err) = save_authorized(&self.store_path, &entries) {
+                tracing::warn!("failed to persist authorized nodes: {err:#}");
+            }
+            return BindOutcome::BoundViaInvitation;
+        }
+
+        // 3. No match.
+        if active.is_none() {
+            // Absent or expired: drop it so later attempts fail fast.
+            inner.pending = None;
+            return BindOutcome::NoActiveToken;
+        }
+        inner.failed_attempts += 1;
+        if inner.failed_attempts >= self.max_attempts.load(Ordering::Relaxed) {
+            inner.pending = None;
+            tracing::warn!(
+                attempts = inner.failed_attempts,
+                "bind token revoked after too many failed attempts"
+            );
+            BindOutcome::Revoked
+        } else {
+            BindOutcome::TokenMismatch
+        }
+    }
+
+    /// Insert `node` into the authorized set (the caller holds the lock), reset
+    /// the failure counter, and return the entries to persist.
+    fn authorize(inner: &mut Inner, node: EndpointId) -> Vec<String> {
+        inner.authenticated.insert(node);
+        inner.failed_attempts = 0;
+        inner.authenticated.iter().map(|id| id.to_string()).collect()
     }
 
     /// Whether a connection from `node` may use the serve ALPN.
@@ -528,6 +620,7 @@ mod tests {
                 pending: None,
                 authenticated: HashSet::new(),
                 names: HashMap::new(),
+                invitations: HashMap::new(),
                 failed_attempts: 0,
             }),
             store_path: std::env::temp_dir().join(format!("raemote-test-{name}")),
@@ -783,5 +876,99 @@ mod tests {
         let infos = state.device_infos();
         assert!(infos.iter().any(|d| d.node_id == node(2) && d.name == "Bravo"));
         assert!(!infos.iter().any(|d| d.node_id == node(1)));
+    }
+
+    #[test]
+    fn invitation_authorizes_a_device_once() {
+        let state = test_state("invite-once");
+        let invite = state
+            .mint_invitation(Duration::from_secs(60), node(9), 3)
+            .unwrap();
+
+        assert_eq!(
+            state.authenticate(node(1), &invite.token_hex),
+            BindOutcome::BoundViaInvitation
+        );
+        assert!(state.is_authorized(node(1)));
+
+        // A second device can't reuse the consumed invitation.
+        assert_eq!(
+            state.authenticate(node(2), &invite.token_hex),
+            BindOutcome::NoActiveToken
+        );
+        assert!(!state.is_authorized(node(2)));
+    }
+
+    #[test]
+    fn invitation_survives_a_rescan_by_an_authorized_device() {
+        let state = test_state("invite-existing");
+        let info = state.mint_token(Duration::from_secs(60));
+        assert_eq!(state.authenticate(node(1), &info.token_hex), BindOutcome::Bound);
+
+        let invite = state
+            .mint_invitation(Duration::from_secs(60), node(1), 3)
+            .unwrap();
+        // The already-paired device re-scans: nothing changes, invite not spent.
+        assert_eq!(
+            state.authenticate(node(1), &invite.token_hex),
+            BindOutcome::AlreadyAuthorized
+        );
+        assert_eq!(
+            state.authenticate(node(2), &invite.token_hex),
+            BindOutcome::BoundViaInvitation
+        );
+    }
+
+    #[test]
+    fn expired_invitation_is_rejected() {
+        let state = test_state("invite-expired");
+        let invite = state
+            .mint_invitation(Duration::from_secs(60), node(9), 3)
+            .unwrap();
+        if let Some(invitation) = state
+            .inner
+            .lock()
+            .unwrap()
+            .invitations
+            .values_mut()
+            .next()
+        {
+            invitation.expires_at = Instant::now() - Duration::from_secs(1);
+        }
+        assert_eq!(
+            state.authenticate(node(1), &invite.token_hex),
+            BindOutcome::NoActiveToken
+        );
+        assert!(!state.is_authorized(node(1)));
+    }
+
+    #[test]
+    fn outstanding_invitations_are_bounded() {
+        let state = test_state("invite-bound");
+        assert!(state.mint_invitation(Duration::from_secs(60), node(9), 2).is_ok());
+        assert!(state.mint_invitation(Duration::from_secs(60), node(9), 2).is_ok());
+        assert!(state.mint_invitation(Duration::from_secs(60), node(9), 2).is_err());
+    }
+
+    #[test]
+    fn invitations_are_independent() {
+        let state = test_state("invite-independent");
+        let first = state
+            .mint_invitation(Duration::from_secs(60), node(9), 3)
+            .unwrap();
+        let second = state
+            .mint_invitation(Duration::from_secs(60), node(9), 3)
+            .unwrap();
+        assert_ne!(first.token_hex, second.token_hex);
+
+        assert_eq!(
+            state.authenticate(node(1), &first.token_hex),
+            BindOutcome::BoundViaInvitation
+        );
+        // Consuming one doesn't consume the other.
+        assert_eq!(
+            state.authenticate(node(2), &second.token_hex),
+            BindOutcome::BoundViaInvitation
+        );
     }
 }
