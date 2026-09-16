@@ -29,29 +29,47 @@ replace=${REPLACE:-0}
 
 [ -d "$assets_dir" ] || { echo "error: no such directory: $assets_dir" >&2; exit 1; }
 
+# Gitee rejects an empty `body` parameter ("body is missing"), and our own
+# GitHub releases don't set one, so fall back to a line describing the mirror.
 body_file=${RELEASE_BODY_FILE:-}
 tmp_body=
-if [ -z "$body_file" ]; then
+if [ -z "$body_file" ] || [ ! -s "$body_file" ]; then
     tmp_body=$(mktemp)
+    printf 'Mirrored from the GitHub release %s.\n' "$tag" >"$tmp_body"
     body_file=$tmp_body
 fi
 # shellcheck disable=SC2064
 trap '[ -n "$tmp_body" ] && rm -f "$tmp_body"' EXIT
 
-jq() { python3 -c "$1"; }
-
-# GET with the token in the form body, so it never lands in a URL (or a log).
-auth_get() {
-    curl -fsS --max-time 60 -G --data-urlencode "access_token=$GITEE_TOKEN" "$1"
+# The token goes in the form body (never a URL), so it can't leak into a log.
+# Errors print the request and the API's own message, minus the token.
+api_call() { # method url [curl args...]
+    local method=$1 url=$2; shift 2
+    local out code
+    out=$(mktemp)
+    code=$(curl -sS --max-time 600 -X "$method" "$url" "$@" -o "$out" -w '%{http_code}' || echo 000)
+    if [ "$code" = 000 ] || [ "$code" -ge 400 ]; then
+        printf 'error: %s %s -> HTTP %s\n' "$method" "$url" "$code" >&2
+        head -c 500 "$out" >&2 || true
+        printf '\n' >&2
+        rm -f "$out"
+        return 1
+    fi
+    cat "$out"
+    rm -f "$out"
 }
 
+jq() { python3 -c "$1"; }
+
 # ---------------------------------------------------------------- the release
-release_id=$(auth_get "$api/releases/tags/$tag" | jq 'import json,sys
+release_id=$(api_call GET "$api/releases/tags/$tag" \
+    -G --data-urlencode "access_token=$GITEE_TOKEN" \
+    | jq 'import json,sys
 d = json.load(sys.stdin)
 print("" if not isinstance(d, dict) else d.get("id", ""))')
 
 if [ -z "$release_id" ]; then
-    release_id=$(curl -fsS --max-time 60 -X POST "$api/releases" \
+    release_id=$(api_call POST "$api/releases" \
         --data-urlencode "access_token=$GITEE_TOKEN" \
         --data-urlencode "tag_name=$tag" \
         --data-urlencode "target_commitish=$tag" \
@@ -62,7 +80,7 @@ if [ -z "$release_id" ]; then
     [ -n "$release_id" ] || { echo "error: the Gitee API did not return a release id" >&2; exit 1; }
     echo "created Gitee release for $tag (id $release_id)"
 else
-    curl -fsS --max-time 60 -X PATCH "$api/releases/$release_id" \
+    api_call PATCH "$api/releases/$release_id" \
         --data-urlencode "access_token=$GITEE_TOKEN" \
         --data-urlencode "tag_name=$tag" \
         --data-urlencode "name=$name" \
@@ -73,7 +91,9 @@ fi
 
 # ------------------------------------------------------------ the attachments
 attachments() {
-    auth_get "$api/releases/$release_id/attach_files" | jq 'import json,sys
+    api_call GET "$api/releases/$release_id/attach_files" \
+        -G --data-urlencode "access_token=$GITEE_TOKEN" \
+        | jq 'import json,sys
 for a in (json.load(sys.stdin) or []):
     print(a.get("id"), a.get("name"))'
 }
@@ -90,13 +110,12 @@ upload() { # file
         fi
         local id
         for id in $existing; do
-            curl -fsS --max-time 60 -X DELETE \
-                --data-urlencode "access_token=$GITEE_TOKEN" \
-                "$api/releases/$release_id/attach_files/$id" >/dev/null
+            api_call DELETE "$api/releases/$release_id/attach_files/$id" \
+                --data-urlencode "access_token=$GITEE_TOKEN" >/dev/null
         done
     fi
 
-    curl -fsS --max-time 600 -X POST "$api/releases/$release_id/attach_files" \
+    api_call POST "$api/releases/$release_id/attach_files" \
         -F "access_token=$GITEE_TOKEN" -F "file=@$file" >/dev/null
     echo "  uploaded $filename"
 }
