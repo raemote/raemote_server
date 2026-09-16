@@ -10,6 +10,14 @@ name: sync-release-gitee
 # Backfill or re-sync an older release by hand:
 #   gh workflow run sync-release-gitee.yml -f tag=v0.1.0
 on:
+  # `release: published` alone is not enough: when release.yml creates the
+  # release with the automatic GITHUB_TOKEN, GitHub does *not* fire that event
+  # for other workflows (token-generated events never start a run). So mirror
+  # when the release workflow itself finishes. `release:` is kept for releases
+  # published by hand or through the UI.
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   release:
     types: [published]
   workflow_dispatch:
@@ -32,6 +40,8 @@ concurrency:
 
 jobs:
   mirror:
+    # A failed release build has nothing to mirror.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,9 +52,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_TAG: ${{ github.event.release.tag_name }}
           INPUT_TAG: ${{ inputs.tag }}
+          RUN_REF: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
           tag=${EVENT_TAG:-${INPUT_TAG:-}}
+          # A `workflow_run` carries the tag that triggered the release build.
+          if [ -z "$tag" ] && [ -n "${RUN_REF:-}" ] \
+            && gh release view "$RUN_REF" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            tag="$RUN_REF"
+          fi
+          # Manual dispatch with no tag, or a workflow_run without a release:
+          # fall back to whatever is latest.
           if [ -z "$tag" ]; then
             tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
           fi

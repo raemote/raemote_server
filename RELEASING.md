@@ -36,8 +36,11 @@ root. Asset names omit the version so `releases/latest/download/<asset>` works.
 
 4. Sanity-check the release page: four tarballs + `checksums.txt`.
 
-5. **The Gitee mirror is automatic.** Publishing the release triggers
-   [`sync-release-gitee.yml`](.github/workflows/sync-release-gitee.yml), which
+5. **The Gitee mirror is automatic.** When the release workflow finishes,
+   [`sync-release-gitee.yml`](.github/workflows/sync-release-gitee.yml) runs (it
+   triggers on `workflow_run`, not `release: published` — a release created with
+   the automatic `GITHUB_TOKEN` does not fire that event for other workflows)
+   and
    copies the GitHub release (name, notes and assets) to a Gitee release for the
    same tag. This matters because `install.sh` prefers Gitee and GitHub is
    unreliable on some networks (mainland China especially), so a release that
