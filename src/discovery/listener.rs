@@ -4,8 +4,10 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use super::model::Origin;
+use super::proc_sockets;
 
 /// A candidate origin plus the process that owns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,12 +153,114 @@ pub const BUILTIN_EXCLUDE_PROCESSES: &[&str] = &[
 
 /// Enumerate locally-listening TCP sockets and filter them down to plausible
 /// web-app candidates. Blocking (OS calls); call via `spawn_blocking`.
-pub fn enumerate(filter: &ListenerFilter) -> Result<Vec<Candidate>> {
+///
+/// `include_unattributed` folds in listening sockets whose owning process we
+/// can't read (see `merge_unattributed`); without it, a root-owned service like
+/// a system `nginx` is invisible.
+pub fn enumerate(
+    filter: &ListenerFilter,
+    include_unattributed: bool,
+) -> Result<FilterOutcome> {
     let all: Vec<listeners::Listener> = listeners::get_all()
         .map_err(|e| anyhow::anyhow!("failed to enumerate listeners: {e}"))?
         .into_iter()
         .collect();
-    Ok(filter_listeners(&all, filter))
+    let all = if include_unattributed {
+        merge_unattributed(all, proc_sockets::listening_tcp())
+    } else {
+        all
+    };
+    Ok(filter_listeners_detailed(&all, filter))
+}
+
+/// Why a listening socket did not become a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Below `discovery.min_port`.
+    BelowMinPort,
+    /// On the built-in denylist or `discovery.exclude_ports`.
+    ExcludedPort,
+    /// On the built-in denylist or `discovery.exclude_processes`.
+    ExcludedProcess,
+    /// Bound to a specific address rather than loopback/wildcard, while
+    /// `discovery.loopback_only` is on.
+    NotLocalBind,
+    /// On `discovery.exclude_origins`.
+    ExcludedOrigin,
+    /// Another socket already produced this origin.
+    Duplicate,
+    /// The HTTP probe got an error status and no page title.
+    NotCredible,
+    /// The HTTP probe got no usable response at all.
+    Unreachable,
+}
+
+impl SkipReason {
+    /// A short, user-facing explanation.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::BelowMinPort => "below discovery.min_port",
+            Self::ExcludedPort => "port on the denylist",
+            Self::ExcludedProcess => "process on the denylist",
+            Self::NotLocalBind => "bound to a specific address (discovery.loopback_only)",
+            Self::ExcludedOrigin => "on discovery.exclude_origins",
+            Self::Duplicate => "duplicate origin",
+            Self::NotCredible => "no usable page (error status, no title)",
+            Self::Unreachable => "not HTTP / unreachable",
+        }
+    }
+}
+
+/// A listening socket that was considered and skipped, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skipped {
+    /// `host:port` of the socket.
+    pub origin: String,
+    /// Owning process, when it could be read.
+    pub process: Option<String>,
+    /// Why it was skipped.
+    pub reason: SkipReason,
+}
+
+/// What a filtering pass produced: the candidates, and why the rest were
+/// dropped. Only listening TCP sockets are reported — every established
+/// connection would otherwise drown the list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FilterOutcome {
+    /// Sockets worth probing.
+    pub candidates: Vec<Candidate>,
+    /// Listening sockets that were dropped, sorted by port.
+    pub skipped: Vec<Skipped>,
+}
+
+/// Add listening sockets that `listeners` could not attribute to a process.
+///
+/// The synthetic entries carry no process name and no pid, so the process
+/// denylist cannot apply to them — but every other filter (port, bind, origin
+/// excludes) and the HTTP probe still do, and a missing process name costs
+/// nothing when the probe finds a page title.
+pub fn merge_unattributed(
+    mut attributed: Vec<listeners::Listener>,
+    extra: Vec<SocketAddr>,
+) -> Vec<listeners::Listener> {
+    let known: HashSet<SocketAddr> = attributed.iter().map(|l| l.socket).collect();
+    attributed.extend(
+        extra
+            .into_iter()
+            .filter(|socket| !known.contains(socket))
+            .map(|socket| listeners::Listener {
+                process: listeners::Process {
+                    pid: 0,
+                    name: String::new(),
+                    path: String::new(),
+                },
+                socket,
+                protocol: listeners::Protocol::TCP,
+                state: listeners::SocketState::Listen,
+            }),
+    );
+    attributed
 }
 
 /// Pure filtering step, split out for testing without OS access.
@@ -164,8 +268,17 @@ pub fn filter_listeners(
     all: &[listeners::Listener],
     filter: &ListenerFilter,
 ) -> Vec<Candidate> {
+    filter_listeners_detailed(all, filter).candidates
+}
+
+/// The same filter, also reporting why each listening socket was dropped.
+pub fn filter_listeners_detailed(
+    all: &[listeners::Listener],
+    filter: &ListenerFilter,
+) -> FilterOutcome {
     let mut seen: HashSet<Origin> = HashSet::new();
     let mut out = Vec::new();
+    let mut skipped: Vec<Skipped> = Vec::new();
 
     for l in all {
         if l.protocol != listeners::Protocol::TCP {
@@ -174,44 +287,63 @@ pub fn filter_listeners(
         if l.state != listeners::SocketState::Listen {
             continue;
         }
+        let process_name = l.process.name.trim();
+        let process = (!process_name.is_empty()).then(|| process_name.to_string());
+        let skip = |reason: SkipReason, skipped: &mut Vec<Skipped>| {
+            skipped.push(Skipped {
+                origin: l.socket.to_string(),
+                process: process.clone(),
+                reason,
+            });
+        };
+
         let port = l.socket.port();
-        if port == 0 || port < filter.min_port {
+        if port == 0 {
+            continue;
+        }
+        if port < filter.min_port {
+            skip(SkipReason::BelowMinPort, &mut skipped);
             continue;
         }
         if filter.exclude_ports.contains(&port) {
+            skip(SkipReason::ExcludedPort, &mut skipped);
             continue;
         }
-        let process_name = l.process.name.trim();
-        if !process_name.is_empty()
-            && filter.exclude_processes.contains(&process_name.to_ascii_lowercase())
+        if let Some(name) = process.as_deref()
+            && filter.exclude_processes.contains(&name.to_ascii_lowercase())
         {
+            skip(SkipReason::ExcludedProcess, &mut skipped);
             continue;
         }
         if filter.loopback_only && !is_local_bind(&l.socket) {
+            skip(SkipReason::NotLocalBind, &mut skipped);
             continue;
         }
 
         let origin = Origin::http(Origin::local_host(l.socket), port);
         if filter.exclude_origins.contains(&origin) {
+            skip(SkipReason::ExcludedOrigin, &mut skipped);
             continue;
         }
         if !seen.insert(origin.clone()) {
+            skip(SkipReason::Duplicate, &mut skipped);
             continue;
         }
         out.push(Candidate {
             origin,
-            process: if process_name.is_empty() {
-                None
-            } else {
-                Some(process_name.to_string())
-            },
-            pid: Some(l.process.pid),
+            process,
+            // An unattributed socket (see `merge_unattributed`) has pid 0.
+            pid: (l.process.pid != 0).then_some(l.process.pid),
         });
     }
 
     // Deterministic order (by port) so names/catalog stay stable across scans.
     out.sort_by(|a, b| a.origin.port.cmp(&b.origin.port));
-    out
+    skipped.sort_by_key(|s| s.origin.clone());
+    FilterOutcome {
+        candidates: out,
+        skipped,
+    }
 }
 
 fn is_local_bind(addr: &SocketAddr) -> bool {
@@ -253,6 +385,38 @@ mod tests {
         assert_eq!(got[0].origin.host, "127.0.0.1");
         assert_eq!(got[0].origin.port, 5173);
         assert_eq!(got[0].process.as_deref(), Some("node"));
+    }
+
+    #[test]
+    fn merge_keeps_unattributed_sockets_without_a_process() {
+        // What an unreadable (e.g. root-owned) listener looks like: the socket
+        // is in the table, no process could be attributed to it.
+        let merged = merge_unattributed(
+            vec![listener("127.0.0.1:5173", Protocol::TCP, SocketState::Listen, "node")],
+            vec![
+                "0.0.0.0:8080".parse().unwrap(),
+                // Already attributed — must not be duplicated.
+                "127.0.0.1:5173".parse().unwrap(),
+            ],
+        );
+        let got = filter_listeners(&merged, &filter());
+        assert_eq!(got.len(), 2);
+
+        let nginx_like = got.iter().find(|c| c.origin.port == 8080).unwrap();
+        assert_eq!(nginx_like.origin.host, "127.0.0.1");
+        assert_eq!(nginx_like.process, None);
+        assert_eq!(nginx_like.pid, None);
+
+        let node = got.iter().find(|c| c.origin.port == 5173).unwrap();
+        assert_eq!(node.process.as_deref(), Some("node"));
+        assert_eq!(node.pid, Some(42));
+    }
+
+    #[test]
+    fn unattributed_sockets_still_respect_the_bind_filter() {
+        // A LAN-only bind is excluded whether or not we know its process.
+        let merged = merge_unattributed(vec![], vec!["192.168.1.5:8080".parse().unwrap()]);
+        assert!(filter_listeners(&merged, &filter()).is_empty());
     }
 
     #[test]

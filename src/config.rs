@@ -174,6 +174,13 @@ pub struct DiscoveryConfig {
     pub https_probe: bool,
     /// Only consider loopback/wildcard binds.
     pub loopback_only: bool,
+    /// Also consider listening sockets whose owning process can't be read —
+    /// another user's, or a root-owned system service such as the `nginx` in
+    /// front of an app. The process name is unavailable then (the HTTP probe
+    /// usually supplies the name instead), and every other filter still
+    /// applies. Linux only: elsewhere the process list is already complete.
+    #[serde(default = "default_true")]
+    pub include_unattributed: bool,
     /// Ports to exclude, in addition to the built-in denylist.
     #[serde(default)]
     pub exclude_ports: Vec<u16>,
@@ -198,6 +205,7 @@ impl Default for DiscoveryConfig {
             http_probe: true,
             https_probe: false,
             loopback_only: true,
+            include_unattributed: true,
             exclude_ports: Vec::new(),
             exclude_processes: Vec::new(),
             exclude_origins: Vec::new(),
@@ -464,6 +472,8 @@ min_port = 1024
 http_probe = true
 https_probe = false
 loopback_only = true
+# Also pick up listeners owned by another user (e.g. a root-owned nginx).
+include_unattributed = true
 exclude_ports = []
 exclude_processes = []
 exclude_origins = []

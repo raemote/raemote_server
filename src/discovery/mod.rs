@@ -7,6 +7,7 @@
 pub mod listener;
 pub mod model;
 pub mod probe;
+pub mod proc_sockets;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +20,7 @@ use tokio::task::JoinSet;
 use crate::catalog::Catalog;
 use crate::config::Config;
 
-use listener::ListenerFilter;
+use listener::{ListenerFilter, SkipReason, Skipped};
 use model::{DiscoveredApp, Origin};
 
 /// A verified app plus when we last confirmed it.
@@ -40,6 +41,9 @@ pub struct DiscoveryEngine {
     shutdown: Arc<Notify>,
     /// Bumped after every catalog rebuild; lets callers wait for a scan.
     catalog_generation: Arc<AtomicU64>,
+    /// Why the most recent scan skipped each listening socket, for
+    /// `raemote discover --verbose`.
+    last_scan: Arc<RwLock<Vec<Skipped>>>,
     cache: HashMap<Origin, CachedApp>,
 }
 
@@ -51,6 +55,7 @@ impl DiscoveryEngine {
         trigger: Arc<Notify>,
         shutdown: Arc<Notify>,
         catalog_generation: Arc<AtomicU64>,
+        last_scan: Arc<RwLock<Vec<Skipped>>>,
     ) -> Self {
         Self {
             config,
@@ -58,6 +63,7 @@ impl DiscoveryEngine {
             trigger,
             shutdown,
             catalog_generation,
+            last_scan,
             cache: HashMap::new(),
         }
     }
@@ -84,7 +90,7 @@ impl DiscoveryEngine {
 
     /// Run a single discovery cycle.
     pub async fn scan_once(&mut self) {
-        let (enabled, filter, probe_timeout, max_concurrent, recheck) = {
+        let (enabled, filter, include_unattributed, probe_timeout, max_concurrent, recheck) = {
             let cfg = self.config.read().expect("config poisoned");
             let d = &cfg.discovery;
             (
@@ -96,6 +102,7 @@ impl DiscoveryEngine {
                     &d.exclude_processes,
                     &d.exclude_origins,
                 ),
+                d.include_unattributed,
                 Duration::from_millis(d.probe_timeout_ms.max(1)),
                 d.max_concurrent_probes.max(1),
                 Duration::from_secs(d.recheck_secs.max(1)),
@@ -109,9 +116,12 @@ impl DiscoveryEngine {
         }
 
         // Enumeration is blocking (OS calls); keep it off the async runtime.
-        let candidates = match tokio::task::spawn_blocking(move || listener::enumerate(&filter)).await
+        let outcome = match tokio::task::spawn_blocking(move || {
+            listener::enumerate(&filter, include_unattributed)
+        })
+        .await
         {
-            Ok(Ok(c)) => c,
+            Ok(Ok(outcome)) => outcome,
             Ok(Err(e)) => {
                 tracing::warn!("discovery enumeration failed: {e:#}");
                 return;
@@ -121,6 +131,10 @@ impl DiscoveryEngine {
                 return;
             }
         };
+        let listener::FilterOutcome {
+            candidates,
+            mut skipped,
+        } = outcome;
 
         // Drop cache entries whose socket is gone.
         let live: HashSet<Origin> = candidates.iter().map(|c| c.origin.clone()).collect();
@@ -178,16 +192,27 @@ impl DiscoveryEngine {
                             origin = %candidate.origin.authority(),
                             "skipping low-confidence candidate (error status, no title)"
                         );
+                        skipped.push(Skipped {
+                            origin: candidate.origin.authority(),
+                            process: candidate.process.clone(),
+                            reason: SkipReason::NotCredible,
+                        });
                         self.cache.remove(&candidate.origin);
                     }
                     None => {
                         // Not HTTP / unreachable: ensure it is not exposed.
+                        skipped.push(Skipped {
+                            origin: candidate.origin.authority(),
+                            process: candidate.process.clone(),
+                            reason: SkipReason::Unreachable,
+                        });
                         self.cache.remove(&candidate.origin);
                     }
                 }
             }
         }
 
+        *self.last_scan.write().expect("last_scan poisoned") = skipped;
         self.rebuild_catalog();
     }
 

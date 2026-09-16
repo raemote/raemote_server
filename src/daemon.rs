@@ -16,10 +16,13 @@ use crate::auth::AuthState;
 use crate::bind::{BindHandler, BIND_ALPN, DEFAULT_MAX_BIND_CONNECTIONS};
 use crate::catalog::Catalog;
 use crate::config::{self, Config};
-use crate::discovery::DiscoveryEngine;
+use crate::discovery::{self, DiscoveryEngine};
 use crate::http::{AppState, ServeHandler, SERVE_ALPN};
 use crate::ipc::unix::IpcHandler;
-use crate::ipc::{self, AppInfoResponse, ReloadResponse, Request, Response, StatusResponse, TokenResponse};
+use crate::ipc::{
+    self, AppInfoResponse, DiscoverReportResponse, ReloadResponse, Request, Response,
+    StatusResponse, TokenResponse,
+};
 use crate::qr::print_binding;
 
 /// How long `DiscoverNow` waits for a scan to complete.
@@ -39,6 +42,8 @@ struct DaemonState {
     started_at: Instant,
     config_path: std::path::PathBuf,
     shutdown: Arc<Notify>,
+    /// Why the last discovery scan skipped each listening socket.
+    last_scan: Arc<RwLock<Vec<discovery::listener::Skipped>>>,
 }
 
 impl DaemonState {
@@ -197,6 +202,21 @@ impl IpcHandler for DaemonState {
                 }
             }
             Request::ListApps => Response::Apps(self.apps_snapshot()),
+            Request::DiscoverReport => {
+                // Same scan-and-wait as DiscoverNow, plus the skip report.
+                let before = self.catalog_generation.load(Ordering::Relaxed);
+                self.discovery_trigger.notify_one();
+                let deadline = Instant::now() + DISCOVER_NOW_TIMEOUT;
+                while self.catalog_generation.load(Ordering::Relaxed) == before
+                    && Instant::now() < deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Response::DiscoverReport(DiscoverReportResponse {
+                    apps: self.apps_snapshot(),
+                    skipped: self.last_scan.read().expect("last_scan poisoned").clone(),
+                })
+            }
             Request::DiscoverNow => {
                 let before = self.catalog_generation.load(Ordering::Relaxed);
                 self.discovery_trigger.notify_one();
@@ -302,12 +322,14 @@ pub async fn run() -> Result<()> {
     print_binding(&endpoint, &token);
 
     let shutdown = Arc::new(Notify::new());
+    let last_scan = Arc::new(RwLock::new(Vec::new()));
     let discovery_engine = DiscoveryEngine::new(
         config.clone(),
         catalog.clone(),
         discovery_trigger.clone(),
         shutdown.clone(),
         catalog_generation.clone(),
+        last_scan.clone(),
     );
     let discovery_handle = tokio::spawn(discovery_engine.run());
 
@@ -340,6 +362,7 @@ pub async fn run() -> Result<()> {
         started_at: Instant::now(),
         config_path,
         shutdown: shutdown.clone(),
+        last_scan,
     };
 
     // Spawn IPC server

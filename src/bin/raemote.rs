@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use raemote::config::{self, AppConfig};
+use raemote::discovery::listener::Skipped;
 use raemote::discovery::model::Origin;
 use raemote::ipc::{self, AppInfoResponse, Request, Response, StatusResponse};
 use raemote::ipc::unix::IpcClient;
@@ -69,6 +70,9 @@ enum Commands {
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
+        /// Also list the listening sockets that were skipped, and why
+        #[arg(long)]
+        verbose: bool,
     },
     /// Show the daemon log
     Logs {
@@ -202,7 +206,7 @@ async fn main() -> Result<()> {
             AppsCommands::Hide { target } => cmd_apps_hide(&target).await,
             AppsCommands::Unhide { target } => cmd_apps_unhide(&target).await,
         },
-        Commands::Discover { json } => cmd_discover(json).await,
+        Commands::Discover { json, verbose } => cmd_discover(json, verbose).await,
         Commands::Logs { lines, follow } => cmd_logs(lines, follow).await,
         Commands::Doctor { json, verbose } => cmd_doctor(json, verbose).await,
     }
@@ -986,6 +990,8 @@ fn cmd_config_get(key: &str) -> Result<()> {
         "serve.rate_limit.max" => Some(cfg.serve.rate_limit.max.to_string()),
         "network.proxy" => Some(cfg.network.proxy.clone().unwrap_or_default()),
         "network.relay_url" => Some(cfg.network.relay_url.clone().unwrap_or_default()),
+        "discovery.loopback_only" => Some(cfg.discovery.loopback_only.to_string()),
+        "discovery.include_unattributed" => Some(cfg.discovery.include_unattributed.to_string()),
         _ => None,
     };
     match value {
@@ -1030,6 +1036,12 @@ async fn cmd_config_set(key: &str, value: &str) -> Result<()> {
         }
         "serve.rate_limit.max" => {
             cfg.serve.rate_limit.max = value.parse().context("invalid value")?;
+        }
+        "discovery.loopback_only" => {
+            cfg.discovery.loopback_only = value.parse().context("invalid value")?;
+        }
+        "discovery.include_unattributed" => {
+            cfg.discovery.include_unattributed = value.parse().context("invalid value")?;
         }
         "network.proxy" => {
             cfg.network.proxy = (!value.is_empty()).then(|| value.to_string());
@@ -1126,12 +1138,17 @@ async fn cmd_apps_list() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_discover(json: bool) -> Result<()> {
+async fn cmd_discover(json: bool, verbose: bool) -> Result<()> {
     if !daemon_running() {
         eprintln!("daemon is not running");
         std::process::exit(1);
     }
-    match ipc_request(Request::DiscoverNow).await? {
+    let request = if verbose {
+        Request::DiscoverReport
+    } else {
+        Request::DiscoverNow
+    };
+    match ipc_request(request).await? {
         Response::Apps(apps) => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&apps)?);
@@ -1140,7 +1157,42 @@ async fn cmd_discover(json: bool) -> Result<()> {
             }
             Ok(())
         }
+        Response::DiscoverReport(report) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_apps(&report.apps);
+                print_skipped(&report.skipped);
+            }
+            Ok(())
+        }
         resp => Err(anyhow::anyhow!("unexpected response: {resp:?}")),
+    }
+}
+
+/// Print why listening sockets did not become apps.
+///
+/// Sockets below `discovery.min_port` are included on purpose: "my app is on
+/// port 80" is exactly the kind of thing this report is for.
+fn print_skipped(skipped: &[Skipped]) {
+    const LIMIT: usize = 50;
+
+    if skipped.is_empty() {
+        println!("nothing skipped: every listening socket became an app");
+        return;
+    }
+    println!();
+    println!("{} listening socket(s) skipped:", skipped.len());
+    for entry in skipped.iter().take(LIMIT) {
+        println!(
+            "  {:<22} {:<16} {}",
+            entry.origin,
+            entry.process.as_deref().unwrap_or("-"),
+            entry.reason.describe()
+        );
+    }
+    if skipped.len() > LIMIT {
+        println!("  ... and {} more", skipped.len() - LIMIT);
     }
 }
 

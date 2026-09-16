@@ -32,6 +32,16 @@ raemote logs --follow   # stream it live
   an API or a non-HTTP protocol, it won't be listed.
 - Confirm it is reachable on the computer: open `http://127.0.0.1:<port>` there.
 - Run `raemote discover`, then `raemote apps list`.
+- Ask why: `raemote discover --verbose` lists every listening socket that was
+  *not* exposed and the reason (denylisted port or process, a specific-address
+  bind, a page with no title, unreachable, …). That answers most cases at once.
+- Apps behind a service owned by another user — a root-owned `nginx` in front of
+  your app, say — are picked up too: raemote reads the kernel's socket table as
+  well as the process list. Set `discovery.include_unattributed = false` to
+  ignore them again.
+- A bind to a *specific* address (e.g. `listen 192.168.1.5:8080`) is ignored
+  while `discovery.loopback_only` is on (the default). Bind `0.0.0.0`/loopback
+  instead, or turn it off: `raemote config set discovery.loopback_only false`.
 - On macOS, only apps owned by your user are visible (system services stay
   private). Docker-published apps are user-owned and *are* visible.
 - Still missing? Add it by hand: `raemote apps add myserver 8080`.

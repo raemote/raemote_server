@@ -52,6 +52,9 @@ pub enum Request {
     ListApps,
     /// Trigger a discovery scan and return the resulting catalog.
     DiscoverNow,
+    /// Trigger a discovery scan and return the catalog plus why listening
+    /// sockets were skipped (`raemote discover --verbose`).
+    DiscoverReport,
     /// Shut down the daemon.
     Shutdown,
 }
@@ -75,6 +78,8 @@ pub enum Response {
     Reload(ReloadResponse),
     /// Merged catalog apps.
     Apps(Vec<AppInfoResponse>),
+    /// Merged catalog apps plus the discovery skip report.
+    DiscoverReport(DiscoverReportResponse),
 }
 
 /// Daemon status, returned for [`Request::Status`].
@@ -102,6 +107,15 @@ pub struct StatusResponse {
     pub relay_urls: Vec<String>,
     /// Local socket addresses the endpoint is bound to.
     pub bound_sockets: Vec<String>,
+}
+
+/// Result of [`Request::DiscoverReport`]: the catalog, plus what was skipped.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiscoverReportResponse {
+    /// The merged catalog, as [`AppInfoResponse`]s.
+    pub apps: Vec<AppInfoResponse>,
+    /// Listening sockets that did not become apps, with the reason.
+    pub skipped: Vec<crate::discovery::listener::Skipped>,
 }
 
 /// A catalog entry, returned by [`Request::ListApps`] and [`Request::DiscoverNow`].
