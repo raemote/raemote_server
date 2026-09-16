@@ -67,3 +67,6 @@ jobs:
           files: |
             *.tar.gz
             checksums.txt
+          # Notes from the commits since the last release; the Gitee mirror
+          # carries the same body across.
+          generate_release_notes: true

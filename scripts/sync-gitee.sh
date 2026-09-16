@@ -47,7 +47,7 @@ api_call() { # method url [curl args...]
     local method=$1 url=$2; shift 2
     local out code
     out=$(mktemp)
-    code=$(curl -sS --max-time 600 -X "$method" "$url" "$@" -o "$out" -w '%{http_code}' || echo 000)
+    code=$(curl -sS --max-time 1800 --connect-timeout 30 -X "$method" "$url" "$@" -o "$out" -w '%{http_code}' || echo 000)
     if [ "$code" = 000 ] || [ "$code" -ge 400 ]; then
         printf 'error: %s %s -> HTTP %s\n' "$method" "$url" "$code" >&2
         head -c 500 "$out" >&2 || true
@@ -61,6 +61,15 @@ api_call() { # method url [curl args...]
 
 jq() { python3 -c "$1"; }
 
+# Uploading ~10 MB per asset from a GitHub runner to Gitee takes minutes and
+# occasionally drops, so give a failed call one more go before giving up.
+retry() {
+    if ! "$@"; then
+        printf '  retrying once...\n' >&2
+        "$@"
+    fi
+}
+
 # ---------------------------------------------------------------- the release
 release_id=$(api_call GET "$api/releases/tags/$tag" \
     -G --data-urlencode "access_token=$GITEE_TOKEN" \
@@ -69,7 +78,7 @@ d = json.load(sys.stdin)
 print("" if not isinstance(d, dict) else d.get("id", ""))')
 
 if [ -z "$release_id" ]; then
-    release_id=$(api_call POST "$api/releases" \
+    release_id=$(retry api_call POST "$api/releases" \
         --data-urlencode "access_token=$GITEE_TOKEN" \
         --data-urlencode "tag_name=$tag" \
         --data-urlencode "target_commitish=$tag" \
@@ -80,7 +89,7 @@ if [ -z "$release_id" ]; then
     [ -n "$release_id" ] || { echo "error: the Gitee API did not return a release id" >&2; exit 1; }
     echo "created Gitee release for $tag (id $release_id)"
 else
-    api_call PATCH "$api/releases/$release_id" \
+    retry api_call PATCH "$api/releases/$release_id" \
         --data-urlencode "access_token=$GITEE_TOKEN" \
         --data-urlencode "tag_name=$tag" \
         --data-urlencode "name=$name" \
@@ -110,12 +119,12 @@ upload() { # file
         fi
         local id
         for id in $existing; do
-            api_call DELETE "$api/releases/$release_id/attach_files/$id" \
+            retry api_call DELETE "$api/releases/$release_id/attach_files/$id" \
                 --data-urlencode "access_token=$GITEE_TOKEN" >/dev/null
         done
     fi
 
-    api_call POST "$api/releases/$release_id/attach_files" \
+    retry api_call POST "$api/releases/$release_id/attach_files" \
         -F "access_token=$GITEE_TOKEN" -F "file=@$file" >/dev/null
     echo "  uploaded $filename"
 }

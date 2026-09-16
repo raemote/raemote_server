@@ -61,6 +61,11 @@ root. Asset names omit the version so `releases/latest/download/<asset>` works.
    Gitee release assets don't need re-signing — `checksums.txt` covers the
    tarballs and the installer verifies it whichever source it used.
 
+   Two things to know: the mirror takes roughly 10–20 minutes (a GitHub runner
+   uploads ~45 MB to Gitee at ~130 KB/s, and the script allows 30 min per asset
+   with one retry), and Gitee rejects an *empty* release body, so a release
+   without notes is mirrored with a one-line fallback instead.
+
 6. Verify the one-liner on a clean machine (fresh `HOME` is enough):
 
    ```sh
