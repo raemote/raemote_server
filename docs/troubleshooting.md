@@ -35,10 +35,12 @@ raemote logs --follow   # stream it live
 - Ask why: `raemote discover --verbose` lists every listening socket that was
   *not* exposed and the reason (denylisted port or process, a specific-address
   bind, a page with no title, unreachable, …). That answers most cases at once.
-- Apps behind a service owned by another user — a root-owned `nginx` in front of
-  your app, say — are picked up too: raemote reads the kernel's socket table as
-  well as the process list. Set `discovery.include_unattributed = false` to
-  ignore them again.
+- Listeners raemote can't map to a process are picked up too: raemote reads the
+  kernel's socket table as well as the process list, so a root-owned `nginx` in
+  front of your app, or a container port-forward (Docker/podman/`pasta`, common
+  with Distrobox and on the Steam Deck), is still discovered — with the page
+  title as its name, since there is no process name to fall back on. Set
+  `discovery.include_unattributed = false` to ignore them again.
 - A bind to a *specific* address (e.g. `listen 192.168.1.5:8080`) is ignored
   while `discovery.loopback_only` is on (the default). Bind `0.0.0.0`/loopback
   instead, or turn it off: `raemote config set discovery.loopback_only false`.
