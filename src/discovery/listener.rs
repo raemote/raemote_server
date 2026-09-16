@@ -206,7 +206,7 @@ impl SkipReason {
             Self::NotLocalBind => "bound to a specific address (discovery.loopback_only)",
             Self::ExcludedOrigin => "on discovery.exclude_origins",
             Self::Duplicate => "duplicate origin",
-            Self::NotCredible => "no usable page (error status, no title)",
+            Self::NotCredible => "no usable page (error page, or an error status)",
             Self::Unreachable => "not HTTP / unreachable",
         }
     }

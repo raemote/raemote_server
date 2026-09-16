@@ -227,15 +227,63 @@ impl DiscoveryEngine {
 }
 
 /// Whether a probe looks like a real web app rather than, say, a local HTTP
-/// proxy answering `GET /` with an error and no page.
+/// proxy answering `GET /` with an error, or a transient error page.
 ///
-/// Any non-error status counts (so JSON APIs and redirects are kept), as does
-/// any response with a `<title>`, as does an auth-required status (401/403)
-/// even without a title — an auth-gated app is still a web app. Other error
-/// statuses without a page (e.g. a proxy answering `GET /` with 400) are
-/// dropped.
+/// Kept: any non-error status (so JSON APIs and redirects count), any titled
+/// page, and auth-required (401/403) even without a title — an auth-gated app
+/// is still a web app.
+///
+/// Dropped: error statuses (the page is usually just the error, and its title
+/// would otherwise make it look like an app — an nginx or Steam `404 Not
+/// Found` is not something to show on a phone), and any page whose title is
+/// itself an error (`Error response`, `Bad Gateway`, …).
 fn is_credible(result: &probe::ProbeResult) -> bool {
-    result.title.is_some() || result.status < 400 || matches!(result.status, 401 | 403)
+    if let Some(title) = result.title.as_deref()
+        && looks_like_error_page(title)
+    {
+        return false;
+    }
+    if matches!(result.status, 401 | 403) {
+        return true;
+    }
+    if result.status >= 400 {
+        return false;
+    }
+    result.title.is_some() || result.status < 400
+}
+
+/// Page titles that mean "something went wrong", not "here is an app".
+///
+/// Compared after lowercasing and trimming; a handful of exact phrases rather
+/// than substrings, so a real app called "404 Not Found" (or a title that
+/// merely contains "error") is unaffected.
+fn looks_like_error_page(title: &str) -> bool {
+    const ERROR_TITLES: &[&str] = &[
+        "error",
+        "error response",
+        "internal server error",
+        "500 internal server error",
+        "bad gateway",
+        "502 bad gateway",
+        "service unavailable",
+        "503 service unavailable",
+        "gateway timeout",
+        "504 gateway timeout",
+        "bad request",
+        "400 bad request",
+        "unauthorized",
+        "403 forbidden",
+        "not found",
+        "404 not found",
+        "410 gone",
+        "connection refused",
+        "this site can't be reached",
+        "this site can’t be reached",
+        "web server is down",
+        "page not found",
+    ];
+    let title = title.trim().to_ascii_lowercase();
+    ERROR_TITLES.contains(&title.as_str())
 }
 
 #[cfg(test)]
@@ -260,6 +308,19 @@ mod tests {
     fn error_with_title_is_credible() {
         // A login page often answers 401 but still has a title.
         assert!(is_credible(&result(401, Some("Sign in"))));
+    }
+
+    #[test]
+    fn error_pages_are_not_apps() {
+        // A titled error page is still an error page: nginx and Steam both
+        // serve these on ports we probe.
+        assert!(!is_credible(&result(404, Some("404 Not Found"))));
+        assert!(!is_credible(&result(200, Some("Error response"))));
+        assert!(!is_credible(&result(500, Some("Internal Server Error"))));
+        assert!(!is_credible(&result(502, None)));
+        // …but a real page that merely mentions a status is fine.
+        assert!(is_credible(&result(200, Some("ETF 风险平价看板"))));
+        assert!(is_credible(&result(200, Some("Untitled"))));
     }
 
     #[test]
