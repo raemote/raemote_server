@@ -1,0 +1,86 @@
+name: sync-release-gitee
+
+# Mirror every published release to Gitee.
+#
+# `install.sh` prefers Gitee, and GitHub is unreliable on some networks
+# (mainland China especially), so a release that only exists here would make the
+# one-liner silently fall back to a flaky path — or fail. Needs a `GITEE_TOKEN`
+# repository secret (a Gitee personal access token with the `projects` scope).
+#
+# Backfill or re-sync an older release by hand:
+#   gh workflow run sync-release-gitee.yml -f tag=v0.1.0
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to mirror (defaults to the latest release)
+        type: string
+        required: false
+      replace:
+        description: Re-upload assets that are already attached
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-release-gitee
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag=${EVENT_TAG:-${INPUT_TAG:-}}
+          if [ -z "$tag" ]; then
+            tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "mirroring $tag"
+
+      - name: Download the release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" --dir assets
+          ls -l assets
+
+      - name: Mirror to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          REPLACE: ${{ inputs.replace && '1' || '0' }}
+        run: |
+          set -euo pipefail
+
+          # Carry the release's own name and notes across.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json name,body > release.json
+          RELEASE_NAME=$(python3 -c 'import json; print(json.load(open("release.json"))["name"] or "")')
+          python3 -c 'import json; open("release-body.md", "w").write(json.load(open("release.json"))["body"] or "")'
+          export RELEASE_NAME RELEASE_BODY_FILE=release-body.md
+
+          bash scripts/sync-gitee.sh "$TAG" assets | tee summary.txt
+
+          url=$(tail -n1 summary.txt)
+          {
+            echo "### Gitee mirror"
+            echo
+            echo "Mirrored \`$TAG\` to $url"
+          } >> "$GITHUB_STEP_SUMMARY"

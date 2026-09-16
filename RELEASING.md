@@ -36,16 +36,26 @@ root. Asset names omit the version so `releases/latest/download/<asset>` works.
 
 4. Sanity-check the release page: four tarballs + `checksums.txt`.
 
-5. **Mirror the same five assets to a Gitee release** for the tag
-   (`pppkin/raemote_server`). The installer prefers Gitee, and GitHub is
+5. **The Gitee mirror is automatic.** Publishing the release triggers
+   [`sync-release-gitee.yml`](.github/workflows/sync-release-gitee.yml), which
+   copies the GitHub release (name, notes and assets) to a Gitee release for the
+   same tag. This matters because `install.sh` prefers Gitee and GitHub is
    unreliable on some networks (mainland China especially), so a release that
    only exists on GitHub makes the one-liner fall back to a flaky path — or
-   fail. Download the assets from the GitHub release and attach them to a Gitee
-   release for the same tag:
+   fail. It needs a **`GITEE_TOKEN` repository secret** (a Gitee personal access
+   token with the `projects` scope); check the run, and if it failed the release
+   still works everywhere GitHub is reachable.
+
+   Backfill or re-sync a tag by hand:
 
    ```sh
-   gh release download v0.1.0 --dir dist --clobber   # or use scripts/package.sh
-   # then attach dist/* to a Gitee release (web UI, or the Gitee API)
+   gh workflow run sync-release-gitee.yml -f tag=v0.1.0   # -f replace=true to re-upload
+   ```
+
+   Without CI, mirror from the downloaded tarballs:
+
+   ```sh
+   GITEE_TOKEN=... scripts/sync-gitee.sh v0.1.0 dist
    ```
 
    Gitee release assets don't need re-signing — `checksums.txt` covers the
