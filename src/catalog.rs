@@ -88,6 +88,17 @@ impl Catalog {
             });
         }
 
+        // `discovered` comes from a HashMap, so sort it first: otherwise which
+        // of two same-named apps gets the plain name and which gets the port
+        // suffix would depend on iteration order and flip between scans.
+        let mut discovered: Vec<&DiscoveredApp> = discovered.iter().collect();
+        discovered.sort_by(|a, b| {
+            a.origin
+                .port
+                .cmp(&b.origin.port)
+                .then_with(|| a.origin.host.cmp(&b.origin.host))
+        });
+
         for d in discovered {
             // A manual entry on the same origin wins; don't expose it twice.
             if manual_origins.contains(&d.origin) {
@@ -223,6 +234,32 @@ mod tests {
 
         d.process = Some("!!!".to_string());
         assert_eq!(name_base(&d), "app");
+    }
+
+    #[test]
+    fn names_do_not_depend_on_the_order_discovered_arrives_in() {
+        // The discovery cache is a HashMap, so the same two apps can arrive in
+        // either order. Names must be identical either way — otherwise the
+        // phone, which keys per-app state by name, would see them swap.
+        let a = discovered("SPIS", 8080);
+        let b = discovered("SPIS", 8081);
+
+        let forward = Catalog::rebuild(&[], &[a.clone(), b.clone()]);
+        let backward = Catalog::rebuild(&[], &[b, a]);
+
+        let names = |c: &Catalog| -> Vec<String> {
+            c.apps().iter().map(|app| app.name.clone()).collect()
+        };
+        assert_eq!(names(&forward), names(&backward));
+        // The lower port keeps the plain name.
+        assert_eq!(
+            forward
+                .find("spis")
+                .expect("plain name exists")
+                .origin
+                .port,
+            8080
+        );
     }
 
     #[test]
