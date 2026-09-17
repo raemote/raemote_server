@@ -13,6 +13,8 @@ account, no VPN, no port forwarding: the connection is end-to-end encrypted and
 goes direct when it can, otherwise through a public relay that forwards it
 without being able to read it.
 
+<a href="https://testflight.apple.com/join/3AQeWyUR"><img src="testflight_badge.svg" alt="Available on TestFlight" height="64"></a>
+
 ## Install
 
 macOS (Apple Silicon, Intel) or Linux (x86_64, arm64 — a Raspberry Pi works):
@@ -81,6 +83,9 @@ raemote stop | start | restart
 
 GitHub: <https://github.com/raemote/raemote_server> — Gitee mirror:
 <https://gitee.com/pppkin/raemote_server>
+
+Phone app: <https://github.com/raemote/raemote_connector_ios> — Gitee mirror:
+<https://gitee.com/pppkin/raemote_connector_ios>
 
 ## License
 
