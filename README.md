@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Raemote_ICON.png" width="112" alt="Raemote icon">
+  <img src="https://github.com/raemote/raemote_server/raw/main/Raemote_ICON.png" width="112" alt="Raemote icon">
 </p>
 
 # Raemote
@@ -13,7 +13,7 @@ account, no VPN, no port forwarding: the connection is end-to-end encrypted and
 goes direct when it can, otherwise through a public relay that forwards it
 without being able to read it.
 
-<a href="https://testflight.apple.com/join/3AQeWyUR"><img src="testflight_badge.svg" alt="Available on TestFlight" height="64"></a>
+<a href="https://testflight.apple.com/join/3AQeWyUR"><img src="https://github.com/raemote/raemote_server/raw/main/testflight_badge.svg" alt="Available on TestFlight" height="64"></a>
 
 ## Install
 
@@ -76,10 +76,10 @@ raemote stop | start | restart
 
 ## Documentation
 
-[How it works](docs/how-it-works.md) · [Troubleshooting](docs/troubleshooting.md) ·
-[Threat model](docs/threat-model.md) · [Security](SECURITY.md) ·
-[Privacy](PRIVACY.md) · [Acceptable use](docs/acceptable-use.md) ·
-[AI-agent install](docs/agent-install.md) · [Releasing](RELEASING.md)
+[How it works](https://github.com/raemote/raemote_server/blob/main/docs/how-it-works.md) · [Troubleshooting](https://github.com/raemote/raemote_server/blob/main/docs/troubleshooting.md) ·
+[Threat model](https://github.com/raemote/raemote_server/blob/main/docs/threat-model.md) · [Security](https://github.com/raemote/raemote_server/blob/main/SECURITY.md) ·
+[Privacy](https://github.com/raemote/raemote_server/blob/main/PRIVACY.md) · [Acceptable use](https://github.com/raemote/raemote_server/blob/main/docs/acceptable-use.md) ·
+[AI-agent install](https://github.com/raemote/raemote_server/blob/main/docs/agent-install.md) · [Releasing](https://github.com/raemote/raemote_server/blob/main/RELEASING.md)
 
 GitHub: <https://github.com/raemote/raemote_server> — Gitee mirror:
 <https://gitee.com/pppkin/raemote_server>
@@ -89,4 +89,4 @@ Phone app: <https://github.com/raemote/raemote_connector_ios> — Gitee mirror:
 
 ## License
 
-AGPL-3.0-or-later — see [LICENSE](LICENSE).
+AGPL-3.0-or-later — see [LICENSE](https://github.com/raemote/raemote_server/blob/main/LICENSE).

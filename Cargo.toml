@@ -10,6 +10,19 @@ readme = "README.md"
 keywords = ["self-hosted", "remote-access", "p2p", "iroh", "tunnel"]
 categories = ["command-line-utilities", "network-programming"]
 rust-version = "1.91"
+# Keep the published crate to what `cargo install` and library users need:
+# the 1.3 MB app icon, the repo's tooling and the site docs stay in the repo.
+exclude = [
+    "/.github",
+    "/dist",
+    "/docs",
+    "/scripts",
+    "/skills",
+    "/install.sh",
+    "/Raemote_ICON.png",
+    "/testflight_badge.svg",
+    "/RELEASING.md",
+]
 
 [lib]
 name = "raemote"
