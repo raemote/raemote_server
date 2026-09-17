@@ -87,4 +87,4 @@ curl -fsSL https://github.com/raemote/raemote_server/raw/main/install.sh \
   | sh -s -- --uninstall          # add --purge to also delete ~/.raemote
 ```
 
-See the [README](../README.md) for the full command reference.
+See the [README](../README.md) for the common commands, or `raemote --help`.

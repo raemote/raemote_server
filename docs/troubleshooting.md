@@ -66,8 +66,8 @@ Pairing links are intentionally short-lived. Mint a new one:
 raemote pair
 ```
 
-If you want a link that stays valid across restarts, see "Long-lived pairing
-links" in the [README](../README.md).
+If you want a link that stays valid across restarts, see the long-lived pairing
+note in the [README](../README.md) (pin `[bind] token` in the config).
 
 ## I can't tell my devices apart
 
